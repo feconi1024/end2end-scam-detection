@@ -1,0 +1,6 @@
+TeleAntiFraud-28k/TeleAntiFraud-28k/*
+sample_100_balanced/*
+*.csv
+
+__pycache__/*
+*.pyc

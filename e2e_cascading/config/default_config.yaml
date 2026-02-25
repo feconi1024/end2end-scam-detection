@@ -1,0 +1,54 @@
+dataset:
+  # CSV manifests with columns: path, label, [transcript]
+  train_manifest: "TeleAntiFraud-28k/train_manifest.csv"
+  val_manifest: "TeleAntiFraud-28k/val_manifest.csv"
+  test_manifest: "TeleAntiFraud-28k/test_manifest.csv"
+
+  # Audio loading
+  sample_rate: 16000
+
+  # Label names in the manifest
+  scam_label: "scam"
+  non_scam_label: "non_scam"
+
+model:
+  # Hugging Face model identifiers
+  whisper_model_name: "openai/whisper-small"
+  bert_model_name: "bert-base-uncased"
+
+  # Semantic classifier
+  num_labels: 2
+
+  # Projector configuration (Whisper encoder -> BERT hidden size)
+  projector:
+    conv_kernel_size: 3
+    conv_stride: 4
+    conv_padding: 1
+    conv_dilation: 1
+
+  # CTC configuration
+  ctc_blank_token_id: 0
+
+  # Iterative freezing configuration
+  freeze_epochs: 3        # Phase 1: freeze audio encoder for first N epochs
+  audio_unfreeze_num_layers: 4  # Number of top encoder layers to unfreeze
+
+training:
+  num_epochs: 10
+  batch_size: 4
+  learning_rate: 3.0e-5
+  weight_decay: 0.01
+  lr_after_unfreeze_factor: 0.1
+  gradient_accumulation_steps: 1
+
+  ctc_weight: 0.3
+  slu_weight: 0.7
+
+  device: "cuda"   # "cuda" or "cpu"
+  # On Windows, set num_workers=0 to avoid DataLoader pickling issues.
+  num_workers: 0
+  log_interval: 10
+
+  # Checkpoint directory
+  output_dir: "e2e_cascading/checkpoints"
+

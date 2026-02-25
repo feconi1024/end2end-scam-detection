@@ -1,0 +1,12 @@
+# Speech Language Model (SLM) Scam Detector
+# Requires transformers>=4.40.0 for Qwen2AudioForConditionalGeneration
+
+transformers>=4.40.0
+accelerate
+torch
+librosa
+soundfile
+numpy
+pydantic>=2.0.0
+PyYAML
+colorama

@@ -1,0 +1,13 @@
+faster-whisper
+librosa
+soundfile
+numpy
+openai>=1.6.0
+pydantic>=2.0.0
+PyYAML
+colorama
+# Hugging Face backend (when llm.backend == "huggingface")
+transformers>=4.36.0
+torch
+accelerate
+

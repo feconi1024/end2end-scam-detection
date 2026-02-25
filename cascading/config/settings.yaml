@@ -1,0 +1,28 @@
+asr:
+  model_size: "large-v3"
+  device: "cuda"        # or "cpu"
+  compute_type: "float16"
+  beam_size: 5
+  vad_filter: true
+
+llm:
+  backend: "huggingface"        # "openai" or "huggingface"
+  # OpenAI-compatible (when backend == "openai")
+  base_url: "http://localhost:8000/v1"
+  api_key: "YOUR_API_KEY_HERE"
+  model: "Qwen/Qwen2.5-0.5B-Instruct"
+  temperature: 0.0
+  use_structured_output: true
+  max_input_chars: 16000
+  # Hugging Face Transformers (when backend == "huggingface")
+  device_map: "auto"            # "auto", "cuda", "cpu", or null
+  max_new_tokens: 1024
+  torch_dtype: "auto"           # "auto", "float16", "bfloat16", or null
+
+audio:
+  target_sample_rate: 16000
+  supported_extensions:
+    - ".wav"
+    - ".mp3"
+    - ".m4a"
+

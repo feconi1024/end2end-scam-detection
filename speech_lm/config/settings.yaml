@@ -1,0 +1,22 @@
+# Speech Language Model (Qwen2-Audio) Scam Detection Settings
+
+model:
+  model_id: "Qwen/Qwen2-Audio-7B-Instruct"
+  device_map: "auto"
+  torch_dtype: "bfloat16"   # or "float16" - use bfloat16 if available for better numerics
+  load_in_8bit: false       # set true for limited GPU memory
+  trust_remote_code: true
+
+generation:
+  max_new_tokens: 512
+  temperature: 0.1          # low for deterministic output
+  do_sample: true           # required when temperature > 0
+  pad_token_id: null        # use model's default
+
+audio:
+  supported_extensions:
+    - ".wav"
+    - ".mp3"
+    - ".flac"
+    - ".m4a"
+    - ".ogg"

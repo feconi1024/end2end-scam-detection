@@ -8,6 +8,7 @@ import torch
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+from tqdm.auto import tqdm
 
 from .loss import JointCTCSLULoss
 
@@ -124,7 +125,14 @@ class Trainer:
         self.model.train()
         running_loss = 0.0
 
-        for step, batch in enumerate(dataloader, start=1):
+        progress = tqdm(
+            enumerate(dataloader, start=1),
+            total=len(dataloader),
+            desc=f"Epoch {epoch + 1}",
+            leave=False,
+        )
+
+        for step, batch in progress:
             _, loss_dict = self._forward_batch(batch)
 
             loss = loss_dict["loss"]
@@ -133,6 +141,7 @@ class Trainer:
             self.optimizer.zero_grad(set_to_none=True)
 
             running_loss += loss.item()
+            progress.set_postfix(loss=loss.item())
             if step % self.cfg.log_interval == 0:
                 avg_loss = running_loss / self.cfg.log_interval
                 print(f"Epoch {epoch} step {step}: loss={avg_loss:.4f}")

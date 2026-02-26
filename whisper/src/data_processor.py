@@ -106,41 +106,40 @@ def prepare_dataset_mapping_fn(
     tokenizer = processor.tokenizer
 
     def _map_batch(batch: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
-        audio = batch["audio"]
+        try:
+            audio = batch["audio"]
+            # audio is expected in datasets.Audio format (single example when batched=False)
+            array = audio["array"]
+            sr = audio["sampling_rate"]
 
-        # audio is expected in datasets.Audio format
-        array = audio["array"]
-        sr = audio["sampling_rate"]
+            if sr != sampling_rate:
+                duration = array.shape[0] / sr
+                target_len = int(duration * sampling_rate)
+                x_old = np.linspace(0, 1, num=array.shape[0])
+                x_new = np.linspace(0, 1, num=target_len)
+                array = np.interp(x_new, x_old, array).astype(np.float32)
 
-        if sr != sampling_rate:
-            # librosa-style resampling without importing librosa in the core path
-            # to keep dependencies light in this module.
-            # Users can pre-resample the dataset; here we fall back to simple
-            # numpy interpolation as a generic solution.
-            duration = array.shape[0] / sr
-            target_len = int(duration * sampling_rate)
-            x_old = np.linspace(0, 1, num=array.shape[0])
-            x_new = np.linspace(0, 1, num=target_len)
-            array = np.interp(x_new, x_old, array).astype(np.float32)
+            inputs = feature_extractor(
+                array,
+                sampling_rate=sampling_rate,
+                return_attention_mask=False,
+            )
 
-        inputs = feature_extractor(
-            array,
-            sampling_rate=sampling_rate,
-            return_attention_mask=False,
-        )
+            raw_label = batch.get(label_column)
+            intent_tokens = labels_to_tokens(raw_label, label2token=label2token)
+            target_text = format_sml_sequence(intent_tokens=intent_tokens, tokenizer=tokenizer)
 
-        # Build intent token sequence
-        raw_label = batch.get(label_column)
-        intent_tokens = labels_to_tokens(raw_label, label2token=label2token)
-        target_text = format_sml_sequence(intent_tokens=intent_tokens, tokenizer=tokenizer)
+            tokenized = tokenizer(
+                target_text,
+                add_special_tokens=False,
+            )
 
-        tokenized = tokenizer(
-            target_text,
-            add_special_tokens=False,
-        )
-
-        batch["input_features"] = inputs["input_features"][0]
-        batch["labels"] = tokenized["input_ids"]
+            batch["input_features"] = inputs["input_features"][0]
+            batch["labels"] = tokenized["input_ids"]
+        except Exception:
+            # Invalid or missing audio: mark for filtering so training continues
+            batch["input_features"] = None
+            batch["labels"] = None
         return batch
 
     return _map_batch
@@ -262,6 +261,12 @@ def load_and_prepare_datasets(
         ],
         num_proc=num_proc,
     )
+
+    # Remove rows where audio failed to load (invalid/corrupt files)
+    def _valid_row(row: dict) -> bool:
+        return row.get("input_features") is not None
+
+    processed = processed.filter(_valid_row, num_proc=num_proc)
 
     train_dataset = processed[train_split]
     eval_dataset = processed[eval_split]

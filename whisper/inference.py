@@ -82,7 +82,16 @@ def run_inference(
         merge_adapters=True,
     )
 
-    audio = load_audio_for_inference(audio_path=audio_path, sampling_rate=sampling_rate)
+    try:
+        audio = load_audio_for_inference(audio_path=audio_path, sampling_rate=sampling_rate)
+    except Exception as e:
+        return {
+            "error": str(e),
+            "classification_tags": [],
+            "is_scam": None,
+            "transcript": "",
+            "raw_decoded": "",
+        }
 
     input_features = processor.feature_extractor(
         audio,

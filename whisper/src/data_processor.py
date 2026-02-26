@@ -179,9 +179,13 @@ def load_and_prepare_datasets(
             raise ValueError(f"Manifest {manifest} must contain at least 'path' and 'label' columns.")
 
         def _resolve_path(p: str) -> str:
+            # Always return an absolute path so that audio loading works
+            # correctly even in multiprocessing workers where the CWD may differ.
             p_path = Path(p)
             if not p_path.is_absolute():
-                p_path = root_dir / p
+                p_path = (root_dir / p).resolve()
+            else:
+                p_path = p_path.resolve()
             return str(p_path)
 
         df["audio"] = df["path"].apply(_resolve_path)

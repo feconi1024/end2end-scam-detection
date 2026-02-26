@@ -229,7 +229,11 @@ def load_and_prepare_datasets(
                 else:
                     eval_manifest = train_manifest
 
-            root_dir = dataset_path.parent
+            # When dataset_path is a directory like `<root>/TeleAntiFraud-28k`
+            # and CSV paths are `TeleAntiFraud-28k/merged_result/...`,
+            # we need to join against `dataset_path` itself so that
+            # final audio paths become `<root>/TeleAntiFraud-28k/TeleAntiFraud-28k/...`.
+            root_dir = dataset_path
             train_ds = _build_dataset_from_manifest(train_manifest, root_dir=root_dir)
             eval_ds = _build_dataset_from_manifest(eval_manifest, root_dir=root_dir)
             dataset_dict = DatasetDict({train_split: train_ds, eval_split: eval_ds})

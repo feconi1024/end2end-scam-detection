@@ -31,6 +31,7 @@ if str(_speech_lm_root) not in sys.path:
     sys.path.insert(0, str(_speech_lm_root))
 
 from src.pipeline import run_pipeline
+from src.slm_engine import SpeechLanguageModel
 
 
 def _resolve_audio_path(path_str: str, dataset_dir: Path, label: str) -> Path | None:
@@ -163,6 +164,8 @@ def main() -> int:
         return 1
 
     print(f"Evaluating on {len(entries)} audio files...", file=sys.stderr)
+    print("Loading model (once)...", file=sys.stderr)
+    slm = SpeechLanguageModel(config_path=args.config)
 
     y_true: list[bool] = []
     y_pred: list[bool] = []
@@ -177,6 +180,7 @@ def main() -> int:
                 audio_path=audio_path,
                 config_path=args.config,
                 prompt_path=args.prompt,
+                slm=slm,
             )
         except Exception as e:
             print(f"Skipped {audio_path.name}: {e}", file=sys.stderr)

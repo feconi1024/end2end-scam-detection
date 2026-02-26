@@ -16,14 +16,17 @@ def run_pipeline(
     audio_path: str | Path,
     config_path: str | Path | None = None,
     prompt_path: str | Path | None = None,
+    slm: SpeechLanguageModel | None = None,
 ) -> dict:
     """
     Run the full scam detection pipeline: load audio -> SLM inference -> JSON result.
 
     Args:
         audio_path: Path to the target audio file (.wav, .mp3, etc.).
-        config_path: Optional path to settings.yaml.
+        config_path: Optional path to settings.yaml (used only when slm is None).
         prompt_path: Optional path to system prompt.txt.
+        slm: Optional pre-loaded SpeechLanguageModel; if provided, the model is
+            not loaded again (use this when processing multiple files).
 
     Returns:
         Parsed JSON result from the model, with added keys:
@@ -33,24 +36,34 @@ def run_pipeline(
     """
     audio_path = Path(audio_path)
 
-    # Load audio first so we skip the heavy model load when the file is unloadable
-    try:
-        audio = load_audio_for_qwen(audio_path, target_sr=DEFAULT_SAMPLING_RATE)
-    except (FileNotFoundError, ValueError, OSError) as e:
-        return {
-            "skipped": True,
-            "audio_file": str(audio_path),
-            "error": str(e),
-        }
-
-    slm = SpeechLanguageModel(config_path=config_path)
-    target_sr = slm.sampling_rate
-    if target_sr != DEFAULT_SAMPLING_RATE:
-        audio = librosa.resample(
-            audio.astype(float),
-            orig_sr=DEFAULT_SAMPLING_RATE,
-            target_sr=target_sr,
-        ).astype(audio.dtype)
+    if slm is not None:
+        target_sr = slm.sampling_rate
+        try:
+            audio = load_audio_for_qwen(audio_path, target_sr=target_sr)
+        except (FileNotFoundError, ValueError, OSError) as e:
+            return {
+                "skipped": True,
+                "audio_file": str(audio_path),
+                "error": str(e),
+            }
+    else:
+        # Load audio first so we skip the heavy model load when the file is unloadable
+        try:
+            audio = load_audio_for_qwen(audio_path, target_sr=DEFAULT_SAMPLING_RATE)
+        except (FileNotFoundError, ValueError, OSError) as e:
+            return {
+                "skipped": True,
+                "audio_file": str(audio_path),
+                "error": str(e),
+            }
+        slm = SpeechLanguageModel(config_path=config_path)
+        target_sr = slm.sampling_rate
+        if target_sr != DEFAULT_SAMPLING_RATE:
+            audio = librosa.resample(
+                audio.astype(float),
+                orig_sr=DEFAULT_SAMPLING_RATE,
+                target_sr=target_sr,
+            ).astype(audio.dtype)
 
     audio_duration_sec = len(audio) / float(target_sr)
     duration_min = audio_duration_sec / 60.0

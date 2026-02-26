@@ -10,7 +10,8 @@ special_tokens:
 
 label2token:
   scam: "<|scam|>"
-  not_scam: "<|not_scam|>"
+  not_scam: "<|not_scam|>"   # alias if used elsewhere
+  non_scam: "<|not_scam|>"   # matches TeleAntiFraud-28k CSV labels
   impersonation: "<|impersonation|>"
   investment: "<|investment|>"
 

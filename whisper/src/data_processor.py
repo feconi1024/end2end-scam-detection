@@ -5,9 +5,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 import numpy as np
+import pandas as pd
 import soundfile as sf
 import yaml
-from datasets import Audio, DatasetDict, load_from_disk
+from datasets import Audio, Dataset, DatasetDict, load_from_disk
 from transformers import WhisperFeatureExtractor, WhisperProcessor, WhisperTokenizer
 
 
@@ -156,12 +157,88 @@ def load_and_prepare_datasets(
     num_proc: Optional[int] = None,
 ) -> Tuple[Any, Any]:
     """
-    Load a TeleAntiFraud-28k dataset from disk and prepare it for Whisper training.
-    """
-    dataset_dict: DatasetDict = load_from_disk(str(dataset_path))
+    Load a TeleAntiFraud-28k dataset and prepare it for Whisper training.
 
+    This supports two formats:
+    1) A Hugging Face dataset directory created via `datasets.DatasetDict.save_to_disk`
+       (loaded with `load_from_disk`).
+    2) A plain folder containing CSV manifests (e.g. `train_manifest.csv`,
+       `validation_manifest.csv`) with columns: `path,label,transcript`.
+    """
     sampling_rate: int = int(config.get("sampling_rate", 16000))
-    dataset_dict = dataset_dict.cast_column("audio", Audio(sampling_rate=sampling_rate))
+
+    def _build_dataset_from_manifest(manifest: Path, root_dir: Path) -> Dataset:
+        """
+        Build a datasets.Dataset from a CSV manifest.
+        Expected columns: `path,label,transcript`.
+        `path` is interpreted relative to `root_dir` if not absolute.
+        """
+        df = pd.read_csv(manifest)
+
+        if "path" not in df.columns or "label" not in df.columns:
+            raise ValueError(f"Manifest {manifest} must contain at least 'path' and 'label' columns.")
+
+        def _resolve_path(p: str) -> str:
+            p_path = Path(p)
+            if not p_path.is_absolute():
+                p_path = root_dir / p
+            return str(p_path)
+
+        df["audio"] = df["path"].apply(_resolve_path)
+
+        # Ensure transcript column exists even if empty
+        if "transcript" not in df.columns:
+            df["transcript"] = ""
+
+        ds = Dataset.from_pandas(
+            df[["audio", "label", "transcript"]],
+            preserve_index=False,
+        )
+        ds = ds.cast_column("audio", Audio(sampling_rate=sampling_rate))
+        return ds
+
+    dataset_dict: DatasetDict
+
+    if dataset_path.is_dir():
+        # First try: treat as a saved Hugging Face dataset directory
+        try:
+            dataset_dict = load_from_disk(str(dataset_path))
+            dataset_dict = dataset_dict.cast_column("audio", Audio(sampling_rate=sampling_rate))
+        except Exception:
+            # Fallback: treat as TeleAntiFraud-style folder with CSV manifests
+            train_manifest = dataset_path / f"{train_split}_manifest.csv"
+            eval_manifest = dataset_path / f"{eval_split}_manifest.csv"
+
+            if not train_manifest.exists():
+                raise FileNotFoundError(
+                    f"Expected training manifest not found: {train_manifest}. "
+                    f"Provide a dataset directory created via `save_to_disk` or a folder "
+                    f"containing '{train_split}_manifest.csv'."
+                )
+
+            # If a dedicated eval manifest is missing, try a common alternative or
+            # fall back to using the training manifest for both.
+            if not eval_manifest.exists():
+                alt_eval = dataset_path / "validation_manifest.csv"
+                if alt_eval.exists():
+                    eval_manifest = alt_eval
+                else:
+                    eval_manifest = train_manifest
+
+            root_dir = dataset_path.parent
+            train_ds = _build_dataset_from_manifest(train_manifest, root_dir=root_dir)
+            eval_ds = _build_dataset_from_manifest(eval_manifest, root_dir=root_dir)
+            dataset_dict = DatasetDict({train_split: train_ds, eval_split: eval_ds})
+    else:
+        # If a single CSV manifest is given, treat it as both train and eval.
+        if dataset_path.suffix.lower() == ".csv":
+            root_dir = dataset_path.parent
+            train_ds = _build_dataset_from_manifest(dataset_path, root_dir=root_dir)
+            dataset_dict = DatasetDict({train_split: train_ds, eval_split: train_ds})
+        else:
+            # Fallback: assume this is a `save_to_disk` directory path
+            dataset_dict = load_from_disk(str(dataset_path))
+            dataset_dict = dataset_dict.cast_column("audio", Audio(sampling_rate=sampling_rate))
 
     mapping_fn = prepare_dataset_mapping_fn(
         processor=processor,

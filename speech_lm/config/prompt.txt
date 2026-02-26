@@ -9,15 +9,17 @@ Perform step-by-step Chain-of-Thought reasoning:
 
 ## OUTPUT FORMAT
 
-You MUST respond with a valid JSON block only. No markdown, no explanations outside the JSON.
+You MUST respond with exactly one valid JSON object. Use double quotes for keys and strings (valid JSON). No markdown, no code fences, no text before or after the JSON.
 
-{
-  "is_scam": true or false,
-  "fraud_type": "Impersonation" | "Investment" | "Tech Support" | "Normal",
-  "acoustic_analysis": "string describing urgency, stress, synthetic artifacts, background noise",
-  "semantic_analysis": "string describing deceptive intent or requests for money/info",
-  "confidence_score": integer from 0 to 100
-}
+Required keys:
+- "is_scam": boolean (true or false)
+- "fraud_type": one of "Impersonation", "Investment", "Tech Support", "Normal"
+- "acoustic_analysis": string (urgency, stress, synthetic artifacts, background noise)
+- "semantic_analysis": string (deceptive intent or requests for money/info)
+- "confidence_score": integer 0-100
+
+Example (use this exact structure):
+{"is_scam": false, "fraud_type": "Normal", "acoustic_analysis": "...", "semantic_analysis": "...", "confidence_score": 15}
 
 ## FRAUD TYPES
 

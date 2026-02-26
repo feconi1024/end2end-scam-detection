@@ -2,6 +2,7 @@
 Speech Language Model engine wrapping Qwen2-Audio for scam detection.
 """
 
+import ast
 import json
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,9 @@ import torch
 from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration
 
 from .config_loader import GenerationConfig, ModelConfig, load_settings
+
+# Default sampling rate for Whisper-based feature extractor (Qwen2-Audio)
+DEFAULT_SAMPLING_RATE = 16000
 
 
 def _get_torch_dtype(dtype_str: str) -> torch.dtype:
@@ -25,9 +29,10 @@ def _get_torch_dtype(dtype_str: str) -> torch.dtype:
 
 def _extract_json_from_text(text: str) -> dict[str, Any] | None:
     """
-    Extract a JSON object from model output.
-    SLMs may prepend text like 'Here is the analysis:' before the JSON block.
-    Uses brace matching to find the outermost {...} block.
+    Extract a JSON or Python-dict object from model output.
+    SLMs may prepend text before the block or use single-quoted Python dicts.
+    Uses brace matching to find the outermost {...} block, then tries
+    json.loads and ast.literal_eval as fallback.
     """
     start = text.find("{")
     if start == -1:
@@ -39,11 +44,85 @@ def _extract_json_from_text(text: str) -> dict[str, Any] | None:
         elif c == "}":
             depth -= 1
             if depth == 0:
+                block = text[start : i + 1]
                 try:
-                    return json.loads(text[start : i + 1])
+                    return json.loads(block)
                 except json.JSONDecodeError:
-                    return None
+                    pass
+                try:
+                    return ast.literal_eval(block)
+                except (ValueError, SyntaxError):
+                    pass
+                return None
     return None
+
+
+def _map_to_scam_schema(parsed: dict[str, Any]) -> dict[str, Any]:
+    """
+    Map model output that uses different keys (e.g. scam_indicators, spoken_text)
+    to the expected scam-detection schema so the pipeline always returns
+    is_scam, fraud_type, acoustic_analysis, semantic_analysis, confidence_score.
+    """
+    # Already in expected shape
+    if "is_scam" in parsed and "fraud_type" in parsed:
+        return parsed
+
+    result: dict[str, Any] = {
+        "is_scam": False,
+        "fraud_type": "Normal",
+        "acoustic_analysis": "",
+        "semantic_analysis": "",
+        "confidence_score": 50,
+    }
+
+    # Map from common alternative outputs
+    semantic = (
+        parsed.get("semantic_analysis")
+        or parsed.get("scam_indicators")
+        or parsed.get("reasoning")
+        or ""
+    )
+    if semantic:
+        result["semantic_analysis"] = semantic
+        # Infer is_scam from semantic content
+        low = semantic.lower()
+        if any(
+            w in low
+            for w in (
+                "scam",
+                "phishing",
+                "impersonat",
+                "fraud",
+                "deceptive",
+                "fake",
+                "urgent",
+                "pressure",
+            )
+        ):
+            result["is_scam"] = True
+
+    result["acoustic_analysis"] = parsed.get("acoustic_analysis") or parsed.get(
+        "speaker_gender", ""
+    )
+    if parsed.get("age_group"):
+        result["acoustic_analysis"] = (
+            (result["acoustic_analysis"] + f" (age: {parsed['age_group']})").strip()
+        )
+
+    if "fraud_type" in parsed:
+        result["fraud_type"] = parsed["fraud_type"]
+    elif result["is_scam"] and "impersonat" in result["semantic_analysis"].lower():
+        result["fraud_type"] = "Impersonation"
+    elif result["is_scam"]:
+        result["fraud_type"] = "Impersonation"  # default when semantic suggests scam
+
+    if "confidence_score" in parsed:
+        try:
+            result["confidence_score"] = min(100, max(0, int(parsed["confidence_score"])))
+        except (TypeError, ValueError):
+            result["confidence_score"] = 80 if result["is_scam"] else 20
+
+    return result
 
 
 class SpeechLanguageModel:
@@ -77,6 +156,17 @@ class SpeechLanguageModel:
             model_cfg.model_id,
             trust_remote_code=model_cfg.trust_remote_code,
         )
+        # Avoid "pass sampling_rate to WhisperFeatureExtractor" warning
+        if getattr(
+            self.processor.feature_extractor,
+            "sampling_rate",
+            None,
+        ) is None:
+            self.processor.feature_extractor.sampling_rate = DEFAULT_SAMPLING_RATE
+
+        # Avoid "Sliding Window Attention is enabled but not implemented for sdpa" warning
+        load_kwargs["attn_implementation"] = "eager"
+
         self.model = Qwen2AudioForConditionalGeneration.from_pretrained(
             model_cfg.model_id,
             **load_kwargs,
@@ -158,5 +248,5 @@ class SpeechLanguageModel:
 
         parsed = _extract_json_from_text(response)
         if parsed is not None:
-            return parsed
+            return _map_to_scam_schema(parsed)
         return {"raw_response": response.strip(), "parse_error": True}

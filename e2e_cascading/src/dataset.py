@@ -152,25 +152,19 @@ class TeleAntiFraudDataset(Dataset):
         }
 
 
-def create_collate_fn(
-    processor,
-    pad_token_id: int,
-    sample_rate: int,
-) -> Callable[[Sequence[Dict[str, Any]]], Dict[str, Tensor]]:
+class WhisperCollator:
     """
-    Collate function that:
-      - Pads variable-length waveforms and converts them to Whisper log-Mel features.
-      - Pads variable-length token sequences for CTC targets.
-
-    Returns a dict with:
-      - input_features: (B, T_acoustic, n_mels)
-      - audio_attention_mask: (B, T_acoustic)
-      - labels: (B,)
-      - ctc_targets: (B, T_text) or None
-      - ctc_target_lengths: (B,) or None
+    Picklable collator for batching waveforms into Whisper-compatible mel features
+    and CTC targets. Use this so DataLoader with num_workers > 0 works on both
+    Windows (spawn) and Linux/Slurm (fork or spawn).
     """
 
-    def collate(batch: Sequence[Dict[str, Any]]) -> Dict[str, Tensor]:
+    def __init__(self, processor, pad_token_id: int, sample_rate: int) -> None:
+        self.processor = processor
+        self.pad_token_id = pad_token_id
+        self.sample_rate = sample_rate
+
+    def __call__(self, batch: Sequence[Dict[str, Any]]) -> Dict[str, Tensor]:
         # Waveforms (list of 1D tensors) -> list of 1D numpy arrays
         audios_torch: List[Tensor] = [b["audio"] for b in batch]
         audios = [a.cpu().numpy() for a in audios_torch]
@@ -179,9 +173,9 @@ def create_collate_fn(
         # Use the full WhisperProcessor so that input_features are padded/
         # truncated to the fixed length expected by the Whisper encoder
         # (e.g., 3000 frames for 30s of audio).
-        processed = processor(
+        processed = self.processor(
             audios,
-            sampling_rate=sample_rate,
+            sampling_rate=self.sample_rate,
             return_tensors="pt",
         )
         input_features: Tensor = processed.input_features  # (B, n_mels, T_acoustic)
@@ -202,7 +196,7 @@ def create_collate_fn(
             if max_len > 0:
                 padded = torch.full(
                     (len(batch), max_len),
-                    fill_value=pad_token_id,
+                    fill_value=self.pad_token_id,
                     dtype=torch.long,
                 )
                 for i, t in enumerate(token_seqs):
@@ -224,5 +218,20 @@ def create_collate_fn(
             "ctc_target_lengths": ctc_target_lengths,
         }
 
-    return collate
+
+def create_collate_fn(
+    processor,
+    pad_token_id: int,
+    sample_rate: int,
+) -> Callable[[Sequence[Dict[str, Any]]], Dict[str, Tensor]]:
+    """
+    Returns a picklable collator (WhisperCollator) so that DataLoader with
+    num_workers > 0 works on Linux and Slurm. On Windows, num_workers is
+    typically set to 0 in the training script to avoid spawn/pickle issues.
+    """
+    return WhisperCollator(
+        processor=processor,
+        pad_token_id=pad_token_id,
+        sample_rate=sample_rate,
+    )
 

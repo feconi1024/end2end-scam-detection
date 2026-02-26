@@ -5,7 +5,17 @@ Entry point for the Speech Language Model scam detector.
 import argparse
 import json
 import sys
+import warnings
 from pathlib import Path
+
+# Reduce noisy warnings from dependencies (pynvml, transformers, SDPA)
+warnings.filterwarnings("ignore", message=".*pynvml.*", category=FutureWarning)
+warnings.filterwarnings(
+    "ignore", message=".*sampling_rate.*WhisperFeatureExtractor.*", category=UserWarning
+)
+warnings.filterwarnings(
+    "ignore", message=".*Sliding Window Attention.*sdpa.*", category=UserWarning
+)
 
 # Add project root to path for imports
 _speech_lm_root = Path(__file__).resolve().parent

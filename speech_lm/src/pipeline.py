@@ -5,9 +5,11 @@ Main orchestration logic for the SLM scam detection pipeline.
 import time
 from pathlib import Path
 
+import librosa
+
 from .audio_utils import load_audio_for_qwen
 from .config_loader import load_settings
-from .slm_engine import SpeechLanguageModel
+from .slm_engine import DEFAULT_SAMPLING_RATE, SpeechLanguageModel
 
 
 def run_pipeline(
@@ -29,10 +31,27 @@ def run_pipeline(
         - inference_time_per_min_audio_sec: inference seconds per 1 minute of audio
         - audio_duration_sec: duration of the input audio in seconds
     """
+    audio_path = Path(audio_path)
+
+    # Load audio first so we skip the heavy model load when the file is unloadable
+    try:
+        audio = load_audio_for_qwen(audio_path, target_sr=DEFAULT_SAMPLING_RATE)
+    except (FileNotFoundError, ValueError, OSError) as e:
+        return {
+            "skipped": True,
+            "audio_file": str(audio_path),
+            "error": str(e),
+        }
+
     slm = SpeechLanguageModel(config_path=config_path)
     target_sr = slm.sampling_rate
+    if target_sr != DEFAULT_SAMPLING_RATE:
+        audio = librosa.resample(
+            audio.astype(float),
+            orig_sr=DEFAULT_SAMPLING_RATE,
+            target_sr=target_sr,
+        ).astype(audio.dtype)
 
-    audio = load_audio_for_qwen(audio_path, target_sr=target_sr)
     audio_duration_sec = len(audio) / float(target_sr)
     duration_min = audio_duration_sec / 60.0
 

@@ -8,13 +8,19 @@ import sys
 import warnings
 from pathlib import Path
 
-# Reduce noisy warnings from dependencies (pynvml, transformers, SDPA)
+# Reduce noisy warnings from dependencies (pynvml, transformers, SDPA, librosa)
 warnings.filterwarnings("ignore", message=".*pynvml.*", category=FutureWarning)
 warnings.filterwarnings(
     "ignore", message=".*sampling_rate.*WhisperFeatureExtractor.*", category=UserWarning
 )
 warnings.filterwarnings(
     "ignore", message=".*Sliding Window Attention.*sdpa.*", category=UserWarning
+)
+warnings.filterwarnings(
+    "ignore", message=".*PySoundFile failed.*audioread.*", category=UserWarning
+)
+warnings.filterwarnings(
+    "ignore", message=".*__audioread_load.*", category=FutureWarning
 )
 
 # Add project root to path for imports
@@ -81,6 +87,10 @@ def main() -> int:
         return 1
 
     print(json.dumps(result, indent=2, ensure_ascii=False))
+
+    if result.get("skipped"):
+        print(f"Skipped (unloadable audio): {args.audio_file}", file=sys.stderr)
+        return 0
 
     is_scam = result.get("is_scam")
     if is_scam is True and not args.no_color and _HAS_COLOR:

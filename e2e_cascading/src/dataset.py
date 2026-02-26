@@ -104,9 +104,9 @@ class TeleAntiFraudDataset(Dataset):
         ex = self.examples[idx]
 
         # Load audio as float32 mono at the target sample rate.
-        # Prefer torchaudio (ships its own codecs, robust for mp3), fall back
-        # to librosa if torchaudio fails for any reason. If both backends
-        # fail, replace with a short silence segment to avoid crashing
+        # Prefer torchaudio (ships its own codecs, robust for mp3). If it
+        # fails for any reason (including unsupported codecs or truncated
+        # streams), replace with a short silence segment to avoid crashing
         # training on a few problematic files.
         path_str = ex.audio_path.as_posix()
         try:
@@ -119,19 +119,15 @@ class TeleAntiFraudDataset(Dataset):
                 )
             audio_tensor = waveform.squeeze(0).float()
         except Exception as e_torch:
-            try:
-                # Fallback to librosa (may rely on system codecs for mp3).
-                audio, sr = librosa.load(path_str, sr=self.sample_rate, mono=True)
-                audio_tensor = torch.from_numpy(audio).float()
-            except Exception as e_librosa:
-                # As a last resort, substitute 1 second of silence so that
-                # a handful of unreadable files do not abort training.
-                print(
-                    "[TeleAntiFraudDataset] Warning: failed to load audio with both "
-                    f"torchaudio and librosa, substituting silence. path={path_str}, "
-                    f"torchaudio_error={repr(e_torch)}, librosa_error={repr(e_librosa)}"
-                )
-                audio_tensor = torch.zeros(self.sample_rate, dtype=torch.float32)
+            # Substitute 1 second of silence so that a handful of unreadable
+            # files do not abort training. We avoid a secondary librosa-based
+            # fallback here to keep dependencies simple and to prevent noisy
+            # codec warnings on some platforms.
+            print(
+                "[TeleAntiFraudDataset] Warning: failed to load audio with torchaudio, "
+                f"substituting silence. path={path_str}, error={repr(e_torch)}"
+            )
+            audio_tensor = torch.zeros(self.sample_rate, dtype=torch.float32)
 
         label_id = self.label2id[ex.label_str]
 

@@ -131,12 +131,25 @@ def build_compute_metrics_fn(
         )
 
         # WER on transcripts
-        wer = float(
-            wer_metric.compute(
-                predictions=pred_transcripts,
-                references=true_transcripts,
+        # Filter out examples with empty reference transcripts, since the
+        # underlying jiwer implementation raises when references contain
+        # empty strings.
+        filtered_pairs = [
+            (p, t)
+            for p, t in zip(pred_transcripts, true_transcripts)
+            if t is not None and t.strip() != ""
+        ]
+
+        if filtered_pairs:
+            f_pred, f_true = zip(*filtered_pairs)
+            wer = float(
+                wer_metric.compute(
+                    predictions=list(f_pred),
+                    references=list(f_true),
+                )
             )
-        )
+        else:
+            wer = 0.0
 
         return {
             "intent_f1_micro": float(intent_f1),

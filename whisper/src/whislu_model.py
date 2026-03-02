@@ -31,12 +31,12 @@ def initialize_whislu_model(
     - Resizes token embeddings for newly added fraud tokens.
     - Applies LoRA on decoder attention (q_proj, v_proj by default).
     - Keeps adapter weights and embedding/lm_head trainable.
+    - Uses float32 weights for numerical stability; any mixed-precision
+      is controlled by the Trainer/AMP, not by model dtype.
     """
-    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-
     model = WhisperForConditionalGeneration.from_pretrained(
         model_name,
-        torch_dtype=dtype,
+        torch_dtype=torch.float32,
         low_cpu_mem_usage=True,
     )
 
@@ -88,12 +88,11 @@ def load_model_with_lora_for_inference(
     """
     Load base Whisper model + trained LoRA adapters for inference.
     Optionally merges adapters back into the base weights for faster inference.
+    Uses float32 weights by default; callers can cast to half if desired.
     """
-    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-
     model = WhisperForConditionalGeneration.from_pretrained(
         base_model_name,
-        torch_dtype=dtype,
+        torch_dtype=torch.float32,
         low_cpu_mem_usage=True,
     )
     model.resize_token_embeddings(len(processor.tokenizer))

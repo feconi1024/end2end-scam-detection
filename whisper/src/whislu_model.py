@@ -53,6 +53,17 @@ def initialize_whislu_model(
 
     model = get_peft_model(model, peft_config)
 
+    # Some trainer versions may still try to pass `input_ids` to the model
+    # (text-style interface). Whisper expects `input_features` instead, so
+    # we defensively drop any stray `input_ids` argument at the PEFT wrapper
+    # level to avoid runtime errors.
+    def _patched_forward(self, *args, **kwargs):
+        kwargs.pop("input_ids", None)
+        return super(type(self), self).forward(*args, **kwargs)
+
+    # Bind the patched forward to this model instance
+    model.forward = _patched_forward.__get__(model, type(model))
+
     # Ensure that only LoRA adapters and the resized embeddings / lm_head are trainable.
     for name, param in model.named_parameters():
         if "lora_" in name or any(
@@ -94,6 +105,15 @@ def load_model_with_lora_for_inference(
 
     if merge_adapters:
         model = model.merge_and_unload()
+
+    # When not merged, we may still get stray `input_ids` from some pipelines;
+    # drop them defensively.
+    if isinstance(model, PeftModel):
+        def _patched_forward(self, *args, **kwargs):
+            kwargs.pop("input_ids", None)
+            return super(type(self), self).forward(*args, **kwargs)
+
+        model.forward = _patched_forward.__get__(model, type(model))
 
     model.eval()
     return model

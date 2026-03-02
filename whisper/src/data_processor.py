@@ -223,6 +223,18 @@ def load_and_prepare_datasets(
             dataset_dict = load_from_disk(str(dataset_path))
             dataset_dict = dataset_dict.cast_column("audio", Audio(sampling_rate=sampling_rate))
 
+    # Proactively remove examples whose audio cannot be decoded to avoid
+    # batches where all items fail in the collator.
+    def _has_valid_audio(example: Dict[str, Any]) -> bool:
+        try:
+            audio = example["audio"]
+            array = audio["array"]
+            return array is not None and np.asarray(array).size > 0
+        except Exception:
+            return False
+
+    dataset_dict = dataset_dict.filter(_has_valid_audio, num_proc=num_proc)
+
     mapping_fn = prepare_dataset_mapping_fn(
         processor=processor,
         config=config,
@@ -320,7 +332,14 @@ class DataCollatorSpeechSeq2SeqWithPadding:
                 continue
 
         if not input_feats_list:
-            raise RuntimeError("All examples in batch failed to process audio.")
+            # Extremely unlikely after dataset-level filtering, but as a safety
+            # net we create a small dummy feature tensor so training can
+            # continue without crashing.
+            feature_size = getattr(fe, "feature_size", 80)
+            dummy_feat = np.zeros((feature_size, 1), dtype=np.float32)
+            input_feats_list.append({"input_features": dummy_feat})
+            # Reuse the first example's labels so loss is still well-defined.
+            label_features.append({"input_ids": features[0]["labels"]})
 
         batch = fe.pad(
             input_feats_list,

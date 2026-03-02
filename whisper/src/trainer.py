@@ -50,6 +50,12 @@ def create_training_arguments(
     elif "eval_strategy" in valid_params:
         base_kwargs["eval_strategy"] = eval_strategy_value
 
+    # Disable external reporting integrations (e.g., wandb) by default to avoid
+    # interactive login / network issues on clusters.
+    if "report_to" in valid_params:
+        # Some versions expect a list, others accept "none" as special value.
+        base_kwargs["report_to"] = training_cfg.get("report_to", "none")
+
     # Filter kwargs to only those accepted by the installed transformers version
     filtered_kwargs = {k: v for k, v in base_kwargs.items() if k in valid_params}
 

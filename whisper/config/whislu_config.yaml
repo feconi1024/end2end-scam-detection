@@ -40,7 +40,7 @@ training:
   evaluation_strategy: "steps"
   save_total_limit: 2
   predict_with_generate: true
-  fp16: true
+  fp16: false
   generation_max_length: 128
 
 inference:

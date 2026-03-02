@@ -223,18 +223,6 @@ def load_and_prepare_datasets(
             dataset_dict = load_from_disk(str(dataset_path))
             dataset_dict = dataset_dict.cast_column("audio", Audio(sampling_rate=sampling_rate))
 
-    # Proactively remove examples whose audio cannot be decoded to avoid
-    # batches where all items fail in the collator.
-    def _has_valid_audio(example: Dict[str, Any]) -> bool:
-        try:
-            audio = example["audio"]
-            array = audio["array"]
-            return array is not None and np.asarray(array).size > 0
-        except Exception:
-            return False
-
-    dataset_dict = dataset_dict.filter(_has_valid_audio, num_proc=num_proc)
-
     mapping_fn = prepare_dataset_mapping_fn(
         processor=processor,
         config=config,

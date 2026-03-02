@@ -320,12 +320,18 @@ class DataCollatorSpeechSeq2SeqWithPadding:
                 continue
 
         if not input_feats_list:
-            # Extremely unlikely after dataset-level filtering, but as a safety
-            # net we create a small dummy feature tensor so training can
-            # continue without crashing.
-            feature_size = getattr(fe, "feature_size", 80)
-            dummy_feat = np.zeros((feature_size, 1), dtype=np.float32)
-            input_feats_list.append({"input_features": dummy_feat})
+            # Extremely unlikely, but as a safety net we synthesize a short
+            # dummy waveform and run it through the feature extractor so that
+            # the resulting mel features have the exact expected shape
+            # (including Whisper's required length of 3000 frames).
+            sampling_rate = getattr(fe, "sampling_rate", 16000)
+            dummy_audio = np.zeros(int(sampling_rate * 0.1), dtype=np.float32)
+            inputs = fe(
+                dummy_audio,
+                sampling_rate=sampling_rate,
+                return_attention_mask=False,
+            )
+            input_feats_list.append({"input_features": inputs["input_features"][0]})
             # Reuse the first example's labels so loss is still well-defined.
             label_features.append({"input_ids": features[0]["labels"]})
 

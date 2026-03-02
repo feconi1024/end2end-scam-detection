@@ -99,47 +99,23 @@ def prepare_dataset_mapping_fn(
     - label: label or list of labels, mapped via config.label2token.
     """
 
-    sampling_rate: int = int(config.get("sampling_rate", 16000))
     label2token: Mapping[str, str] = config.get("label2token", {})
 
-    feature_extractor = processor.feature_extractor
     tokenizer = processor.tokenizer
 
     def _map_batch(batch: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
-        try:
-            audio = batch["audio"]
-            # audio is expected in datasets.Audio format (single example when batched=False)
-            array = audio["array"]
-            sr = audio["sampling_rate"]
+        # Only build label sequence here; audio → log-mel is done on-the-fly
+        # in the data collator to keep memory usage low.
+        raw_label = batch.get(label_column)
+        intent_tokens = labels_to_tokens(raw_label, label2token=label2token)
+        target_text = format_sml_sequence(intent_tokens=intent_tokens, tokenizer=tokenizer)
 
-            if sr != sampling_rate:
-                duration = array.shape[0] / sr
-                target_len = int(duration * sampling_rate)
-                x_old = np.linspace(0, 1, num=array.shape[0])
-                x_new = np.linspace(0, 1, num=target_len)
-                array = np.interp(x_new, x_old, array).astype(np.float32)
+        tokenized = tokenizer(
+            target_text,
+            add_special_tokens=False,
+        )
 
-            inputs = feature_extractor(
-                array,
-                sampling_rate=sampling_rate,
-                return_attention_mask=False,
-            )
-
-            raw_label = batch.get(label_column)
-            intent_tokens = labels_to_tokens(raw_label, label2token=label2token)
-            target_text = format_sml_sequence(intent_tokens=intent_tokens, tokenizer=tokenizer)
-
-            tokenized = tokenizer(
-                target_text,
-                add_special_tokens=False,
-            )
-
-            batch["input_features"] = inputs["input_features"][0]
-            batch["labels"] = tokenized["input_ids"]
-        except Exception:
-            # Invalid or missing audio: mark for filtering so training continues
-            batch["input_features"] = None
-            batch["labels"] = None
+        batch["labels"] = tokenized["input_ids"]
         return batch
 
     return _map_batch
@@ -257,16 +233,11 @@ def load_and_prepare_datasets(
     processed = dataset_dict.map(
         mapping_fn,
         remove_columns=[
-            col for col in dataset_dict[train_split].column_names if col not in ("input_features", "labels")
+            # Keep audio column; drop everything else except labels.
+            col for col in dataset_dict[train_split].column_names if col not in ("audio", "labels")
         ],
         num_proc=num_proc,
     )
-
-    # Remove rows where audio failed to load (invalid/corrupt files)
-    def _valid_row(row: dict) -> bool:
-        return row.get("input_features") is not None
-
-    processed = processed.filter(_valid_row, num_proc=num_proc)
 
     train_dataset = processed[train_split]
     eval_dataset = processed[eval_split]
@@ -306,11 +277,53 @@ class DataCollatorSpeechSeq2SeqWithPadding:
     processor: WhisperProcessor
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
-        input_features = [{"input_features": np.asarray(f["input_features"])} for f in features]
-        label_features = [{"input_ids": f["labels"]} for f in features]
+        """
+        Build batch from raw audio + label ids.
+        Invalid audio examples are skipped at collator time so training
+        is robust to occasional corrupt files.
+        """
+        fe = self.processor.feature_extractor
 
-        batch = self.processor.feature_extractor.pad(
-            input_features,
+        input_feats_list: List[Dict[str, Any]] = []
+        label_features: List[Dict[str, Any]] = []
+
+        for f in features:
+            # Skip examples without labels
+            if "labels" not in f:
+                continue
+
+            try:
+                audio = f["audio"]
+                array = audio["array"]
+                sr = audio["sampling_rate"]
+
+                # Rely on feature extractor's expected sampling rate
+                sampling_rate = getattr(fe, "sampling_rate", sr)
+
+                if sr != sampling_rate:
+                    duration = array.shape[0] / sr
+                    target_len = int(duration * sampling_rate)
+                    x_old = np.linspace(0, 1, num=array.shape[0])
+                    x_new = np.linspace(0, 1, num=target_len)
+                    array = np.interp(x_new, x_old, array).astype(np.float32)
+
+                inputs = fe(
+                    array,
+                    sampling_rate=sampling_rate,
+                    return_attention_mask=False,
+                )
+
+                input_feats_list.append({"input_features": inputs["input_features"][0]})
+                label_features.append({"input_ids": f["labels"]})
+            except Exception:
+                # Corrupt or unreadable audio: drop this example from batch
+                continue
+
+        if not input_feats_list:
+            raise RuntimeError("All examples in batch failed to process audio.")
+
+        batch = fe.pad(
+            input_feats_list,
             padding=True,
             return_tensors="pt",
         )

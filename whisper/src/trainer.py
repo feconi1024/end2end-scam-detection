@@ -5,6 +5,7 @@ from typing import Any, Callable, Dict, Mapping, Optional
 
 from inspect import signature
 
+import torch
 from transformers import (
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
@@ -23,6 +24,15 @@ def create_training_arguments(
     different transformers versions by only passing supported
     keyword arguments.
     """
+    # Prefer full-precision training by default to avoid issues with
+    # GradScaler/AMP configurations on some clusters.
+    use_fp16 = False
+    if training_cfg.get("fp16", False) and torch.cuda.is_available():
+        # Only enable mixed-precision when explicitly requested AND a CUDA
+        # device is available. This avoids "Attempting to unscale FP16
+        # gradients" errors when running on CPU or misconfigured devices.
+        use_fp16 = True
+
     base_kwargs: Dict[str, Any] = {
         "output_dir": str(output_dir),
         "per_device_train_batch_size": int(training_cfg.get("per_device_train_batch_size", 4)),
@@ -36,7 +46,7 @@ def create_training_arguments(
         "eval_steps": int(training_cfg.get("eval_steps", 1000)),
         "save_total_limit": int(training_cfg.get("save_total_limit", 2)),
         "predict_with_generate": bool(training_cfg.get("predict_with_generate", True)),
-        "fp16": bool(training_cfg.get("fp16", True)),
+        "fp16": use_fp16,
         "generation_max_length": int(training_cfg.get("generation_max_length", 128)),
     }
 

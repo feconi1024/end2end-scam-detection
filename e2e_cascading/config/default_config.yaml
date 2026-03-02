@@ -14,7 +14,7 @@ dataset:
 model:
   # Hugging Face model identifiers
   whisper_model_name: "openai/whisper-small"
-  bert_model_name: "bert-base-uncased"
+  bert_model_name: "bert-base-multilingual-uncased"
 
   # Semantic classifier
   num_labels: 2

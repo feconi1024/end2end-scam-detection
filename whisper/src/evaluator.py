@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import evaluate
+import json
 import numpy as np
 from sklearn.metrics import f1_score
 from transformers import WhisperProcessor
@@ -10,36 +11,51 @@ from transformers import WhisperProcessor
 
 def parse_multitask_output(
     text: str,
-    special_tokens: Sequence[str],
+    special_tokens: Sequence[str],  # kept for backward compatibility; unused
     bos_token: str | None,
     eos_token: str | None,
-) -> Tuple[List[str], str]:
+) -> Tuple[str | None, str | None]:
     """
-    Split decoded output into (intent_tags, transcript_text).
+    Parse a JSON-formatted multitask output into (intent, transcript_text).
 
-    Assumes sequences like:
-      <|startoftranscript|><|scam|><|impersonation|> hello world <|endoftext|>
+    Expected structure (whitespace and ordering may vary):
+
+      <|startoftranscript|>{
+        "Text": "...",
+        "Domain": "telephony",
+        "Intent": "scam"
+      }<|endoftext|>
     """
+    # Strip BOS/EOS wrappers if present
     if bos_token and text.startswith(bos_token):
         text = text[len(bos_token) :]
-
     if eos_token and eos_token in text:
         text = text.split(eos_token, 1)[0]
 
-    tokens = text.split()
-    special_set = set(special_tokens)
+    # Extract JSON substring
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None, None
 
-    intent_tags: List[str] = []
-    transcript_tokens: List[str] = []
+    json_part = text[start : end + 1]
+    try:
+        obj = json.loads(json_part)
+    except Exception:
+        return None, None
 
-    for tok in tokens:
-        if tok in special_set:
-            intent_tags.append(tok)
-        else:
-            transcript_tokens.append(tok)
+    intent = obj.get("Intent")
+    transcript = obj.get("Text")
+    if isinstance(intent, str):
+        intent = intent.strip() or None
+    else:
+        intent = None
+    if isinstance(transcript, str):
+        transcript = transcript.strip() or None
+    else:
+        transcript = None
 
-    transcript = " ".join(transcript_tokens).strip()
-    return intent_tags, transcript
+    return intent, transcript
 
 
 def build_compute_metrics_fn(
@@ -49,32 +65,14 @@ def build_compute_metrics_fn(
 ) -> Any:
     """
     Create a compute_metrics function for Seq2SeqTrainer that:
-    - Extracts intent tags and transcripts from generated sequences.
-    - Computes micro F1 over intent tags.
+    - Extracts intents and transcripts from JSON-formatted sequences.
+    - Computes F1 over intents.
     - Computes WER over transcripts.
     """
     wer_metric = evaluate.load("wer")
 
     bos_token = processor.tokenizer.bos_token or "<|startoftranscript|>"
     eos_token = processor.tokenizer.eos_token or "<|endoftext|>"
-
-    all_intents: List[str] = list(label2token.keys())
-    token_to_index: Dict[str, int] = {
-        tok: idx for idx, tok in enumerate(all_intents)
-    }
-    token_values = set(label2token.values())
-
-    def _to_multilabel_vector(tokens: Sequence[str]) -> List[int]:
-        vec = [0] * len(all_intents)
-        for tok in tokens:
-            # tok is a special fraud token; map back to canonical intent if possible
-            # Reverse lookup label2token
-            for label, s_tok in label2token.items():
-                if tok == s_tok:
-                    idx = all_intents.index(label)
-                    vec[idx] = 1
-                    break
-        return vec
 
     def compute_metrics(eval_pred: Any) -> Dict[str, float]:
         predictions, label_ids = eval_pred
@@ -98,42 +96,45 @@ def build_compute_metrics_fn(
             skip_special_tokens=False,
         )
 
-        pred_intents: List[List[int]] = []
-        true_intents: List[List[int]] = []
+        pred_intents: List[str] = []
+        true_intents: List[str] = []
         pred_transcripts: List[str] = []
         true_transcripts: List[str] = []
 
         for p, t in zip(pred_str, label_str):
-            p_tags, p_text = parse_multitask_output(
+            p_intent, p_text = parse_multitask_output(
                 p,
                 special_tokens=special_tokens,
                 bos_token=bos_token,
                 eos_token=eos_token,
             )
-            t_tags, t_text = parse_multitask_output(
+            t_intent, t_text = parse_multitask_output(
                 t,
                 special_tokens=special_tokens,
                 bos_token=bos_token,
                 eos_token=eos_token,
             )
 
-            pred_intents.append(_to_multilabel_vector(p_tags))
-            true_intents.append(_to_multilabel_vector(t_tags))
-            pred_transcripts.append(p_text)
-            true_transcripts.append(t_text)
+            if t_intent is not None:
+                true_intents.append(t_intent)
+                pred_intents.append(p_intent if p_intent is not None else "__invalid__")
 
-        # Intent F1 (multi-label, micro)
-        intent_f1 = f1_score(
-            true_intents,
-            pred_intents,
-            average="micro",
-            zero_division=0.0,
-        )
+            if t_text is not None:
+                true_transcripts.append(t_text)
+                pred_transcripts.append(p_text or "")
 
-        # WER on transcripts
-        # Filter out examples with empty reference transcripts, since the
-        # underlying jiwer implementation raises when references contain
-        # empty strings.
+        # Intent F1 (single-label classification)
+        if true_intents:
+            intent_f1 = f1_score(
+                true_intents,
+                pred_intents,
+                average="micro",
+                zero_division=0.0,
+            )
+        else:
+            intent_f1 = 0.0
+
+        # WER on transcripts – filter out empty references
         filtered_pairs = [
             (p, t)
             for p, t in zip(pred_transcripts, true_transcripts)

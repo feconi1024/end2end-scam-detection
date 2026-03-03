@@ -23,7 +23,7 @@ from src.whislu_model import initialize_whislu_model
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Fine-tune Whisper with LoRA for WhiSLU scam detection (SML)."
+        description="Fine-tune Whisper for WhiSLU scam detection with JSON-formatted multitask targets."
     )
     parser.add_argument(
         "--config",
@@ -113,8 +113,8 @@ def main() -> int:
 
     trainer.train()
 
-    # Save final adapter weights (and tokenizer) for later inference
-    trainer.model.save_pretrained(str(output_dir / "lora_adapter"))
+    # Save final full model weights (and tokenizer) for later inference
+    trainer.model.save_pretrained(str(output_dir / "model"))
     processor.save_pretrained(str(output_dir / "processor"))
 
     return 0

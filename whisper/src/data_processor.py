@@ -4,12 +4,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
+import json
 import numpy as np
 import pandas as pd
 import soundfile as sf
 import yaml
 from datasets import Audio, Dataset, DatasetDict, load_from_disk
-from transformers import WhisperFeatureExtractor, WhisperProcessor, WhisperTokenizer
+from transformers import WhisperProcessor
 
 
 def load_config(config_path: Path) -> Dict[str, Any]:
@@ -19,70 +20,24 @@ def load_config(config_path: Path) -> Dict[str, Any]:
 
 def create_processor(config: Mapping[str, Any]) -> Tuple[WhisperProcessor, int]:
     """
-    Create WhisperProcessor and extend tokenizer with fraud special tokens.
+    Create WhisperProcessor for Whisper-based SLU.
 
     Returns (processor, num_added_tokens).
     """
     model_name = config["model_name"]
-    special_tokens: Sequence[str] = config.get("special_tokens", [])
 
-    feature_extractor = WhisperFeatureExtractor.from_pretrained(model_name)
-    tokenizer = WhisperTokenizer.from_pretrained(
+    processor = WhisperProcessor.from_pretrained(
         model_name,
         language="en",
         task="transcribe",
     )
 
-    num_added = tokenizer.add_tokens(list(special_tokens))
-
     # Ensure we have a pad token; Whisper commonly reuses eos as pad.
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    if processor.tokenizer.pad_token is None:
+        processor.tokenizer.pad_token = processor.tokenizer.eos_token
 
-    processor = WhisperProcessor(feature_extractor=feature_extractor, tokenizer=tokenizer)
-    return processor, num_added
-
-
-def format_sml_sequence(
-    intent_tokens: Sequence[str],
-    tokenizer: WhisperTokenizer,
-) -> str:
-    """
-    Format the multi-task target sequence as:
-    <|startoftranscript|><|scam|><|impersonation|> <|endoftext|>
-    """
-    bos = tokenizer.bos_token or "<|startoftranscript|>"
-    eos = tokenizer.eos_token or "<|endoftext|>"
-
-    tag_str = "".join(intent_tokens) if intent_tokens else ""
-    # Space before eos to separate from last tag.
-    sequence = f"{bos}{tag_str} {eos}"
-    return sequence
-
-
-def labels_to_tokens(
-    raw_label: Any,
-    label2token: Mapping[str, str],
-) -> List[str]:
-    """
-    Map dataset label(s) to the corresponding fraud intent special tokens.
-    Supports single label or list of labels.
-    """
-    if raw_label is None:
-        return []
-
-    if isinstance(raw_label, str):
-        labels = [raw_label]
-    elif isinstance(raw_label, (list, tuple)):
-        labels = list(raw_label)
-    else:
-        labels = [str(raw_label)]
-
-    tokens: List[str] = []
-    for lbl in labels:
-        if lbl in label2token:
-            tokens.append(label2token[lbl])
-    return tokens
+    # No additional special tokens are added when using JSON-formatted targets.
+    return processor, 0
 
 
 def prepare_dataset_mapping_fn(
@@ -92,23 +47,43 @@ def prepare_dataset_mapping_fn(
     text_column: Optional[str] = None,
 ) -> Any:
     """
-    Build a mapping function to prepare TeleAntiFraud-style examples:
-    - audio: Audio (array, sampling_rate)
-    - transcript (optional): not directly used for targets here, because we enforce
-      SML format intent-first.
-    - label: label or list of labels, mapped via config.label2token.
+    Build a mapping function to prepare TeleAntiFraud-style examples with
+    JSON-formatted multitask targets, e.g.:
+
+    {
+      "Text": "hello this is the IRS you owe us money",
+      "Domain": "telephony",
+      "Intent": "scam"
+    }
+
+    The training sequence is:
+      <|startoftranscript|>{...}<|endoftext|>
     """
 
-    label2token: Mapping[str, str] = config.get("label2token", {})
-
     tokenizer = processor.tokenizer
+    default_domain = str(config.get("domain", "telephony"))
 
     def _map_batch(batch: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
-        # Only build label sequence here; audio → log-mel is done on-the-fly
-        # in the data collator to keep memory usage low.
+        # Ground truth label (single-label classification)
         raw_label = batch.get(label_column)
-        intent_tokens = labels_to_tokens(raw_label, label2token=label2token)
-        target_text = format_sml_sequence(intent_tokens=intent_tokens, tokenizer=tokenizer)
+        if isinstance(raw_label, (list, tuple)):
+            raw_label = raw_label[0] if raw_label else ""
+        intent = str(raw_label) if raw_label is not None else ""
+
+        # Ground truth transcript text
+        txt_col = text_column or "transcript"
+        transcript = batch.get(txt_col) or ""
+
+        json_obj = {
+            "Text": transcript,
+            "Domain": default_domain,
+            "Intent": intent,
+        }
+        json_str = json.dumps(json_obj, ensure_ascii=False)
+
+        bos = tokenizer.bos_token or "<|startoftranscript|>"
+        eos = tokenizer.eos_token or "<|endoftext|>"
+        target_text = f"{bos}{json_str}{eos}"
 
         tokenized = tokenizer(
             target_text,

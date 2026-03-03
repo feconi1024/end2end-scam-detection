@@ -36,6 +36,12 @@ def initialize_whislu_model(
     model.config.forced_decoder_ids = None
     model.config.suppress_tokens = []
 
+    # Enable gradient checkpointing to significantly reduce memory usage on
+    # large models like whisper-large-v3 (at the cost of extra compute).
+    model.config.use_cache = False
+    if hasattr(model, "gradient_checkpointing_enable"):
+        model.gradient_checkpointing_enable()
+
     # Freeze the encoder; only the decoder (and lm_head) are updated.
     if hasattr(model, "model") and hasattr(model.model, "encoder"):
         model.model.encoder.requires_grad_(False)

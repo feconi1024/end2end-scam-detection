@@ -14,7 +14,7 @@ if str(_whisper_root / "src") not in sys.path:
 
 from src.data_processor import create_processor, load_audio_for_inference, load_config
 from src.evaluator import parse_multitask_output
-from src.whislu_model import load_model_with_lora_for_inference
+from src.whislu_model import load_whislu_for_inference
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,11 +36,11 @@ def parse_args() -> argparse.Namespace:
         help="Path to whislu_config.yaml used during training.",
     )
     parser.add_argument(
-        "--adapter_dir",
+        "--model_dir",
         "-p",
         type=Path,
         required=True,
-        help="Path to the directory containing the trained LoRA adapter weights (e.g., outputs/whislu/lora_adapter).",
+        help="Path to the directory containing the fine-tuned WhiSLU model (e.g., outputs/whislu/model).",
     )
     parser.add_argument(
         "--processor_dir",
@@ -60,7 +60,7 @@ def parse_args() -> argparse.Namespace:
 def run_inference(
     audio_path: Path,
     config_path: Path,
-    adapter_dir: Path,
+    model_dir: Path,
     processor_dir: Path | None = None,
     intent_only: bool = False,
 ) -> Dict[str, Any]:
@@ -75,11 +75,9 @@ def run_inference(
     else:
         processor, _ = create_processor(config)
 
-    model = load_model_with_lora_for_inference(
-        base_model_name=model_name,
+    model = load_whislu_for_inference(
+        model_dir=str(model_dir),
         processor=processor,
-        peft_checkpoint=str(adapter_dir),
-        merge_adapters=True,
     )
 
     try:
@@ -125,33 +123,30 @@ def run_inference(
         skip_special_tokens=False,
     )[0]
 
-    special_tokens = config.get("special_tokens", [])
     bos = processor.tokenizer.bos_token or "<|startoftranscript|>"
     eos = processor.tokenizer.eos_token or "<|endoftext|>"
 
-    intent_tags, transcript = parse_multitask_output(
+    intent, transcript = parse_multitask_output(
         decoded,
-        special_tokens=special_tokens,
+        special_tokens=[],
         bos_token=bos,
         eos_token=eos,
     )
 
-    # Simple heuristic for binary scam / not_scam classification:
-    # if <|scam|> is present, mark as scam; else not_scam (if explicitly present) or unknown.
-    label2token: Mapping[str, str] = config.get("label2token", {})
-    scam_token = label2token.get("scam", "<|scam|>")
-    not_scam_token = label2token.get("not_scam", "<|not_scam|>")
-
     is_scam: bool | None
-    if scam_token in intent_tags:
-        is_scam = True
-    elif not_scam_token in intent_tags:
-        is_scam = False
-    else:
+    if intent is None:
         is_scam = None
+    else:
+        lower_intent = intent.lower()
+        if "scam" in lower_intent or "fraud" in lower_intent:
+            is_scam = True
+        elif "non_scam" in lower_intent or "not_scam" in lower_intent:
+            is_scam = False
+        else:
+            is_scam = None
 
     result: Dict[str, Any] = {
-        "classification_tags": intent_tags,
+        "intent": intent,
         "is_scam": is_scam,
         "transcript": transcript,
         "raw_decoded": decoded,
@@ -166,14 +161,14 @@ def main() -> int:
         print(f"Error: audio file not found: {args.audio_path}", file=sys.stderr)
         return 1
 
-    if not args.adapter_dir.exists():
-        print(f"Error: adapter_dir not found: {args.adapter_dir}", file=sys.stderr)
+    if not args.model_dir.exists():
+        print(f"Error: model_dir not found: {args.model_dir}", file=sys.stderr)
         return 1
 
     result = run_inference(
         audio_path=args.audio_path,
         config_path=args.config,
-        adapter_dir=args.adapter_dir,
+        model_dir=args.model_dir,
         processor_dir=args.processor_dir,
         intent_only=args.intent_only,
     )

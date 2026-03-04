@@ -4,6 +4,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import evaluate
 import json
+import re
 import numpy as np
 from sklearn.metrics import f1_score
 from transformers import WhisperProcessor
@@ -42,7 +43,14 @@ def parse_multitask_output(
     try:
         obj = json.loads(json_part)
     except Exception:
-        return None, None
+        # Fallback: try to recover intent/text via regex even if JSON is malformed
+        intent_match = re.search(r'"Intent"\s*:\s*"([^"]+)"', text)
+        text_match = re.search(r'"Text"\s*:\s*"([^"]+)"', text)
+        intent = intent_match.group(1).strip() if intent_match else None
+        transcript = text_match.group(1).strip() if text_match else None
+        if not intent and not transcript:
+            return None, None
+        return (intent or None), (transcript or None)
 
     intent = obj.get("Intent")
     transcript = obj.get("Text")

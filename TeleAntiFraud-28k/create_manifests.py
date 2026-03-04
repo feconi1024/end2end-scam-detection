@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,62 @@ NON_SCAM_LABEL = "non_scam"
 class AudioExample:
     rel_path: Path
     label: str
+    transcript: str
+
+
+def _clean_text(text: str) -> str:
+    """
+    Normalize transcript text from config files:
+    - remove newlines
+    - remove asterisk '*' and hash '#'
+    - collapse excessive whitespace
+    """
+    # Replace newlines with spaces
+    text = text.replace("\n", " ")
+    # Remove specific unwanted characters
+    text = text.replace("*", "").replace("#", "")
+    # Collapse multiple spaces
+    text = " ".join(text.split())
+    return text
+
+
+def _load_transcript_for_audio(audio_path: Path) -> str:
+    """
+    Given an absolute path to an audio file, load a neighbouring config file
+    (config.json or config.jsonl, if present) and concatenate all
+    `audio_segments[*].content` fields into a single transcript string.
+    """
+    parent = audio_path.parent
+    json_cfg = parent / "config.json"
+    jsonl_cfg = parent / "config.jsonl"
+
+    contents: List[str] = []
+
+    def _extract_from_data(data: dict) -> None:
+        segments = data.get("audio_segments") or []
+        for seg in segments:
+            text = seg.get("content")
+            if isinstance(text, str) and text.strip():
+                contents.append(_clean_text(text))
+
+    # Prefer config.json if available
+    if json_cfg.is_file():
+        try:
+            with json_cfg.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            _extract_from_data(data)
+        except Exception:
+            pass
+    # Fallback: config.jsonl (one JSON object per line)
+    elif jsonl_cfg.is_file():
+        try:
+            with jsonl_cfg.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            _extract_from_data(data)
+        except Exception:
+            pass
+
+    return " ".join(contents)
 
 
 def find_audio_examples(dataset_root: Path) -> Tuple[List[AudioExample], List[AudioExample]]:
@@ -49,10 +106,11 @@ def find_audio_examples(dataset_root: Path) -> Tuple[List[AudioExample], List[Au
     for mp3 in merged.rglob("*.mp3"):
         rel = mp3.relative_to(dataset_root)
         path_str = mp3.as_posix()
+        transcript = _load_transcript_for_audio(mp3)
         if "tts_fraud" in path_str:
-            scams.append(AudioExample(rel_path=rel, label=SCAM_LABEL))
+            scams.append(AudioExample(rel_path=rel, label=SCAM_LABEL, transcript=transcript))
         elif "tts_test" in path_str:
-            non_scams.append(AudioExample(rel_path=rel, label=NON_SCAM_LABEL))
+            non_scams.append(AudioExample(rel_path=rel, label=NON_SCAM_LABEL, transcript=transcript))
         # ignore other naming patterns if any
 
     return scams, non_scams
@@ -117,7 +175,7 @@ def write_manifest(path: Path, examples: List[AudioExample]) -> None:
                 {
                     "path": 'TeleAntiFraud-28k/' + ex.rel_path.as_posix(),
                     "label": ex.label,
-                    "transcript": "",
+                    "transcript": ex.transcript or "",
                 }
             )
     print(f"Wrote {len(examples)} entries to {path}")

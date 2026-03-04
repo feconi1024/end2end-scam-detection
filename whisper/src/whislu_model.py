@@ -34,6 +34,10 @@ class WhisluWithIntentHead(nn.Module):
         intent_labels: torch.Tensor | None = None,
         **kwargs: Any,
     ):
+        # Some Trainer/Accelerate versions pass extra kwargs such as
+        # `num_items_in_batch` that the underlying model does not accept.
+        kwargs.pop("num_items_in_batch", None)
+
         outputs = self.base_model(
             input_features=input_features,
             labels=labels,

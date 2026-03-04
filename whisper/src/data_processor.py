@@ -336,9 +336,12 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         labels[labels == self.processor.tokenizer.pad_token_id] = -100
         batch["labels"] = labels
 
-        # Intent labels for the auxiliary classifier head
+        # Intent labels for the auxiliary classifier head – only needed during
+        # training (grad-enabled). Avoid passing them during generation/eval
+        # to keep model.generate() kwargs clean.
         import torch
 
-        batch["intent_labels"] = torch.tensor(intent_ids, dtype=torch.long)
+        if torch.is_grad_enabled():
+            batch["intent_labels"] = torch.tensor(intent_ids, dtype=torch.long)
         return batch
 

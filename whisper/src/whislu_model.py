@@ -27,6 +27,12 @@ class WhisluWithIntentHead(nn.Module):
         self.intent_head = nn.Linear(base_model.config.d_model, num_intents)
         self.intent_loss_weight = float(intent_loss_weight)
 
+        # Expose config and generation_config so that Seq2SeqTrainer and
+        # generation utilities can treat this wrapper like the underlying
+        # Whisper model.
+        self.config = base_model.config
+        self.generation_config = getattr(base_model, "generation_config", None)
+
     def forward(
         self,
         input_features=None,

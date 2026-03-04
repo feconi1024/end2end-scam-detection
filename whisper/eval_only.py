@@ -1,15 +1,23 @@
 from pathlib import Path
 import sys
 
-from transformers import set_seed, WhisperForConditionalGeneration
+from transformers import (
+    Seq2SeqTrainer,
+    WhisperForConditionalGeneration,
+)
 
 _whisper_root = Path(__file__).resolve().parent
 if str(_whisper_root / "src") not in sys.path:
     sys.path.insert(0, str(_whisper_root / "src"))
 
-from src.data_processor import create_processor, load_and_prepare_datasets, load_config
+from src.data_processor import (
+    DataCollatorSpeechSeq2SeqWithPadding,
+    create_processor,
+    load_and_prepare_datasets,
+    load_config,
+)
 from src.evaluator import build_compute_metrics_fn
-from src.trainer import create_trainer
+from src.trainer import create_training_arguments
 
 
 def main():
@@ -57,13 +65,26 @@ def main():
         label2token=config.get("label2token", {}),
     )
 
-    trainer = create_trainer(
+    # Build eval-only training arguments
+    output_dir = Path(training_cfg.get("output_dir", "outputs/whislu"))
+    eval_args = create_training_arguments(training_cfg=training_cfg, output_dir=output_dir)
+
+    base_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor)
+
+    def eval_collator(features):
+        # Use the standard collator but drop any auxiliary-only keys such as
+        # intent_labels so that generation sees only the expected kwargs.
+        batch = base_collator(features)
+        batch.pop("intent_labels", None)
+        return batch
+
+    trainer = Seq2SeqTrainer(
         model=model,
-        processor=processor,
-        train_dataset=train_ds,
+        args=eval_args,
+        train_dataset=None,
         eval_dataset=eval_ds,
-        training_cfg=training_cfg,
-        output_dir=Path(training_cfg.get("output_dir", "outputs/whislu")),
+        data_collator=eval_collator,
+        tokenizer=processor.tokenizer,
         compute_metrics=compute_metrics,
     )
 

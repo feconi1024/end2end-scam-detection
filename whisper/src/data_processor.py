@@ -74,10 +74,12 @@ def prepare_dataset_mapping_fn(
         txt_col = text_column or "transcript"
         transcript = batch.get(txt_col) or ""
 
+        # Put Intent first in the JSON so its tokens are predicted early in
+        # the sequence and are not overwhelmed by long transcript tokens.
         json_obj = {
-            "Text": transcript,
-            "Domain": default_domain,
             "Intent": intent,
+            "Domain": default_domain,
+            "Text": transcript,
         }
         json_str = json.dumps(json_obj, ensure_ascii=False)
 

@@ -63,6 +63,15 @@ class WhisluWithIntentHead(nn.Module):
         outputs.intent_logits = intent_logits
         return outputs
 
+    def generate(self, *args: Any, **kwargs: Any):
+        """
+        Delegate generation to the underlying Whisper model, ignoring
+        auxiliary-only arguments like `intent_labels` that are not used
+        during decoding.
+        """
+        kwargs.pop("intent_labels", None)
+        return self.base_model.generate(*args, **kwargs)
+
 
 def initialize_whislu_model(
     model_name: str,

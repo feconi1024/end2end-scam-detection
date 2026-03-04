@@ -86,6 +86,11 @@ def main() -> int:
         num_proc=args.num_proc,
     )
 
+    # Subsample eval set to avoid OOM during generation (eval is memory-heavy).
+    max_eval_samples = int(training_cfg.get("max_eval_samples", 0))
+    if max_eval_samples > 0 and len(eval_dataset) > max_eval_samples:
+        eval_dataset = eval_dataset.select(range(max_eval_samples))
+
     model = initialize_whislu_model(
         model_name=model_name,
         processor=processor,

@@ -33,6 +33,8 @@ def create_training_arguments(
         # gradients" errors when running on CPU or misconfigured devices.
         use_fp16 = True
 
+    use_bf16 = bool(training_cfg.get("bf16", False)) and torch.cuda.is_available()
+
     base_kwargs: Dict[str, Any] = {
         "output_dir": str(output_dir),
         "per_device_train_batch_size": int(training_cfg.get("per_device_train_batch_size", 4)),
@@ -47,8 +49,12 @@ def create_training_arguments(
         "save_total_limit": int(training_cfg.get("save_total_limit", 2)),
         "predict_with_generate": bool(training_cfg.get("predict_with_generate", True)),
         "fp16": use_fp16,
+        "bf16": use_bf16,
         "generation_max_length": int(training_cfg.get("generation_max_length", 128)),
     }
+    max_eval = int(training_cfg.get("max_eval_samples", 0))
+    if max_eval > 0:
+        base_kwargs["max_eval_samples"] = max_eval
 
     # Handle evaluation strategy naming differences across versions
     eval_strategy_value = training_cfg.get("evaluation_strategy", "steps")

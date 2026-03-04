@@ -1,4 +1,5 @@
-model_name: "openai/whisper-large-v3"
+# Use medium for 96GB; large-v3 often OOMs even on H100-96 with full decoder FT.
+model_name: "openai/whisper-medium"
 
 sampling_rate: 16000
 
@@ -9,20 +10,22 @@ lora: {}            # no LoRA when using SML JSON targets
 
 training:
   output_dir: "outputs/whislu"
-  per_device_train_batch_size: 1      # smaller batch to avoid GPU OOM
-  per_device_eval_batch_size: 1       # eval is also memory-heavy (generation)
-  gradient_accumulation_steps: 8      # keep effective batch size while saving memory
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 8
+  max_eval_samples: 128               # cap eval set to avoid OOM during generation
   num_train_epochs: 3
   learning_rate: 1.0e-4
   warmup_steps: 500
   logging_steps: 50
-  save_steps: 2000                    # less frequent, lighter on IO
-  eval_steps: 2000                    # evaluate less often to reduce peak memory
+  save_steps: 2000
+  eval_steps: 2000
   evaluation_strategy: "steps"
   save_total_limit: 2
   predict_with_generate: true
   fp16: false
-  generation_max_length: 96           # shorter generations reduce KV-cache memory
+  bf16: true                          # use bf16 on H100 to cut memory (no GradScaler issues)
+  generation_max_length: 64           # shorter to reduce KV cache during eval
 
 inference:
   max_new_tokens: 128

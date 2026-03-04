@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
-from transformers import set_seed
+
+from transformers import set_seed, WhisperForConditionalGeneration
 
 _whisper_root = Path(__file__).resolve().parent
 if str(_whisper_root / "src") not in sys.path:
@@ -9,7 +10,7 @@ if str(_whisper_root / "src") not in sys.path:
 from src.data_processor import create_processor, load_and_prepare_datasets, load_config
 from src.evaluator import build_compute_metrics_fn
 from src.trainer import create_trainer
-from src.whislu_model import initialize_whislu_model
+
 
 def main():
     config_path = _whisper_root / "config" / "whislu_config.yaml"
@@ -29,15 +30,26 @@ def main():
         num_proc=None,
     )
 
-    # (optional) apply same eval subsampling as train.py
+    # Apply same eval subsampling as train.py to avoid OOM during generation.
     max_eval_samples = int(training_cfg.get("max_eval_samples", 0))
     if max_eval_samples > 0 and len(eval_ds) > max_eval_samples:
         eval_ds = eval_ds.select(range(max_eval_samples))
 
-    model = initialize_whislu_model(model_name=model_name, processor=processor, config=config)
-    # Load trained weights
+    # Load trained full model directly from disk.
     model_dir = Path(training_cfg.get("output_dir", "outputs/whislu")) / "model"
-    model = model.from_pretrained(model_dir)
+    model = WhisperForConditionalGeneration.from_pretrained(
+        model_dir,
+        torch_dtype=None,  # use checkpoint dtype
+        low_cpu_mem_usage=True,
+    )
+
+    # Ensure generation config doesn't enforce language/task tokens so that
+    # JSON-formatted SLU outputs can be produced and evaluated.
+    model.config.forced_decoder_ids = None
+    model.config.suppress_tokens = []
+    if getattr(model, "generation_config", None) is not None:
+        model.generation_config.forced_decoder_ids = None
+        model.generation_config.suppress_tokens = []
 
     compute_metrics = build_compute_metrics_fn(
         processor=processor,
@@ -57,6 +69,7 @@ def main():
 
     metrics = trainer.evaluate()
     print(metrics)
+
 
 if __name__ == "__main__":
     main()

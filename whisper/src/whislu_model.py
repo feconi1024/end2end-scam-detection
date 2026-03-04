@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Mapping
+from typing import Any, Mapping
 
 import torch
 from transformers import WhisperForConditionalGeneration, WhisperProcessor

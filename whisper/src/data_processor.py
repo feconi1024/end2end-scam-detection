@@ -62,6 +62,8 @@ def prepare_dataset_mapping_fn(
 
     tokenizer = processor.tokenizer
     default_domain = str(config.get("domain", "telephony"))
+    intent_classes: Sequence[str] = config.get("intents", ["scam", "non_scam"])
+    intent_to_id: Dict[str, int] = {name: idx for idx, name in enumerate(intent_classes)}
 
     def _map_batch(batch: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
         # Ground truth label (single-label classification)
@@ -69,6 +71,7 @@ def prepare_dataset_mapping_fn(
         if isinstance(raw_label, (list, tuple)):
             raw_label = raw_label[0] if raw_label else ""
         intent = str(raw_label) if raw_label is not None else ""
+        intent_id = intent_to_id.get(intent, -1)
 
         # Ground truth transcript text
         txt_col = text_column or "transcript"
@@ -93,6 +96,7 @@ def prepare_dataset_mapping_fn(
         )
 
         batch["labels"] = tokenized["input_ids"]
+        batch["intent_id"] = intent_id
         return batch
 
     return _map_batch
@@ -263,6 +267,7 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 
         input_feats_list: List[Dict[str, Any]] = []
         label_features: List[Dict[str, Any]] = []
+        intent_ids: List[int] = []
 
         for f in features:
             # Skip examples without labels
@@ -292,6 +297,7 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 
                 input_feats_list.append({"input_features": inputs["input_features"][0]})
                 label_features.append({"input_ids": f["labels"]})
+                intent_ids.append(int(f.get("intent_id", -1)))
             except Exception:
                 # Corrupt or unreadable audio: drop this example from batch
                 continue
@@ -309,8 +315,9 @@ class DataCollatorSpeechSeq2SeqWithPadding:
                 return_attention_mask=False,
             )
             input_feats_list.append({"input_features": inputs["input_features"][0]})
-            # Reuse the first example's labels so loss is still well-defined.
+            # Reuse the first example's labels/intent so loss is still well-defined.
             label_features.append({"input_ids": features[0]["labels"]})
+            intent_ids.append(int(features[0].get("intent_id", -1)))
 
         batch = fe.pad(
             input_feats_list,
@@ -328,5 +335,10 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         # Replace padding token id's with -100 so they are ignored by loss
         labels[labels == self.processor.tokenizer.pad_token_id] = -100
         batch["labels"] = labels
+
+        # Intent labels for the auxiliary classifier head
+        import torch
+
+        batch["intent_labels"] = torch.tensor(intent_ids, dtype=torch.long)
         return batch
 

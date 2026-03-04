@@ -8,6 +8,12 @@ label2token: {}     # unused with JSON targets
 
 lora: {}            # no LoRA when using SML JSON targets
 
+# Intent classes and auxiliary loss weight for the joint classifier head.
+intents:
+  - "scam"
+  - "non_scam"
+intent_loss_weight: 1.0
+
 training:
   output_dir: "outputs/whislu"
   per_device_train_batch_size: 1

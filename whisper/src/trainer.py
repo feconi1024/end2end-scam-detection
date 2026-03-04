@@ -72,6 +72,11 @@ def create_training_arguments(
         # Some versions expect a list, others accept "none" as special value.
         base_kwargs["report_to"] = training_cfg.get("report_to", "none")
 
+    # Avoid safetensors shared-tensor save error for tied weights by falling
+    # back to PyTorch .bin checkpoints when supported.
+    if "save_safetensors" in valid_params:
+        base_kwargs["save_safetensors"] = False
+
     # Filter kwargs to only those accepted by the installed transformers version
     filtered_kwargs = {k: v for k, v in base_kwargs.items() if k in valid_params}
 

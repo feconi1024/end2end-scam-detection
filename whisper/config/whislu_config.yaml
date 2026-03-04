@@ -9,20 +9,20 @@ lora: {}            # no LoRA when using SML JSON targets
 
 training:
   output_dir: "outputs/whislu"
-  per_device_train_batch_size: 1      # smaller batch to avoid GPU OOM
-  per_device_eval_batch_size: 1       # eval is also memory-heavy (generation)
-  gradient_accumulation_steps: 8      # keep effective batch size while saving memory
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 2
   num_train_epochs: 3
   learning_rate: 1.0e-4
   warmup_steps: 500
   logging_steps: 50
-  save_steps: 2000                    # less frequent, lighter on IO
-  eval_steps: 2000                    # evaluate less often to reduce peak memory
+  save_steps: 1000
+  eval_steps: 1000
   evaluation_strategy: "steps"
   save_total_limit: 2
   predict_with_generate: true
   fp16: false
-  generation_max_length: 96           # shorter generations reduce KV-cache memory
+  generation_max_length: 128
 
 inference:
   max_new_tokens: 128

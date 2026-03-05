@@ -82,6 +82,14 @@ class WhisluWithIntentHead(nn.Module):
         kwargs.pop("intent_labels", None)
         return self.base_model.generate(*args, **kwargs)
 
+    def save_pretrained(self, save_directory: str, *args: Any, **kwargs: Any) -> None:
+        """
+        Delegate saving to the underlying Whisper model so that checkpoints
+        are in the standard format and can be loaded with
+        `WhisperForConditionalGeneration.from_pretrained(...)`.
+        """
+        self.base_model.save_pretrained(save_directory, *args, **kwargs)
+
 
 def initialize_whislu_model(
     model_name: str,

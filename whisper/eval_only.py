@@ -44,11 +44,15 @@ def main():
         eval_ds = eval_ds.select(range(max_eval_samples))
 
     # Load trained full model directly from disk.
-    model_dir = Path(training_cfg.get("output_dir", "outputs/whislu")) / "model"
+    model_dir = (Path(training_cfg.get("output_dir", "outputs/whislu")) / "model").resolve()
+    if not model_dir.is_dir():
+        raise FileNotFoundError(f"Trained model directory not found: {model_dir}")
+
     model = WhisperForConditionalGeneration.from_pretrained(
-        model_dir,
+        str(model_dir),
         torch_dtype=None,  # use checkpoint dtype
         low_cpu_mem_usage=True,
+        local_files_only=True,
     )
 
     # Ensure generation config doesn't enforce language/task tokens so that

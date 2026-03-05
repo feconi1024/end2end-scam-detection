@@ -66,6 +66,26 @@ def parse_multitask_output(
     return intent, transcript
 
 
+def _canonical_intent_label(intent: str | None) -> str | None:
+    """
+    Map arbitrary intent text to a canonical label string ("scam" or "non_scam"),
+    using simple heuristics. This makes evaluation robust to minor formatting
+    differences in the generated JSON.
+    """
+    if intent is None:
+        return None
+    t = intent.strip().lower()
+    if not t:
+        return None
+
+    # Non-scam heuristics first to avoid matching the substring "scam" inside.
+    if "non_scam" in t or "non scam" in t or "not_scam" in t or "not scam" in t:
+        return "non_scam"
+    if "scam" in t or "fraud" in t:
+        return "scam"
+    return None
+
+
 def build_compute_metrics_fn(
     processor: WhisperProcessor,
     special_tokens: Sequence[str],
@@ -123,9 +143,14 @@ def build_compute_metrics_fn(
                 eos_token=eos_token,
             )
 
-            if t_intent is not None:
-                true_intents.append(t_intent)
-                pred_intents.append(p_intent if p_intent is not None else "__invalid__")
+            # Canonicalize to {scam, non_scam} labels
+            true_lbl = _canonical_intent_label(t_intent)
+            pred_lbl = _canonical_intent_label(p_intent)
+
+            if true_lbl is not None:
+                true_intents.append(true_lbl)
+                # Treat unknown/invalid predictions as a special wrong label
+                pred_intents.append(pred_lbl if pred_lbl is not None else "__invalid__")
 
             if t_text is not None:
                 true_transcripts.append(t_text)

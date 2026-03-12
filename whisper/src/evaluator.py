@@ -161,7 +161,7 @@ def build_compute_metrics_fn(
             intent_f1 = f1_score(
                 true_intents,
                 pred_intents,
-                average="micro",
+                average="macro",
                 zero_division=0.0,
             )
         else:

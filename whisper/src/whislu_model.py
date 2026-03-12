@@ -13,12 +13,12 @@ def initialize_whislu_model(
     device: str | None = None,
 ) -> WhisperForConditionalGeneration:
     """
-    Initialize Whisper for WhiSLU using the "frozen encoder, full decoder"
-    strategy inspired by WhiSLU/Whisper-SLU:
+    Initialize Whisper for WhiSLU using a fully trainable encoder+decoder:
 
     - Loads a full Whisper model (e.g., openai/whisper-medium) in float32.
-    - Freezes the entire encoder so only the decoder is fine-tuned.
-    - Does not use LoRA/PEFT; full decoder parameters are trainable.
+    - Allows the encoder to adapt (no freezing) so acoustic cues can be
+      leveraged for scam detection.
+    - Does not use LoRA/PEFT; full model parameters are trainable.
     - Disables forced decoder ids and token suppression so the model can
       freely emit JSON-formatted SLU outputs.
     """
@@ -41,9 +41,7 @@ def initialize_whislu_model(
     if hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
 
-    # Freeze the encoder; only the decoder (and lm_head) are updated.
-    if hasattr(model, "model") and hasattr(model.model, "encoder"):
-        model.model.encoder.requires_grad_(False)
+    # Encoder and decoder are both trainable in this configuration.
 
     if device is not None:
         model.to(device)

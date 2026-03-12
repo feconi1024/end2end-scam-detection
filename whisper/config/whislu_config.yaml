@@ -8,15 +8,15 @@ label2token: {}     # unused with JSON targets
 
 lora: {}            # no LoRA when using SML JSON targets
 
-# If true, train only on Intent JSON (no Text) to stabilize intent learning.
-train_intent_only: true
+# Train on BOTH Transcript and Intent to ground the model's semantic understanding
+train_intent_only: false
 
 training:
   output_dir: "outputs/whislu"
   per_device_train_batch_size: 1
   per_device_eval_batch_size: 1
   gradient_accumulation_steps: 8
-  max_eval_samples: 128               # cap eval set to avoid OOM during generation
+  max_eval_samples: 1000              # increased for a more stable evaluation
   num_train_epochs: 3
   learning_rate: 5.0e-5
   warmup_steps: 500
@@ -28,7 +28,7 @@ training:
   predict_with_generate: true
   fp16: false
   bf16: true                          # use bf16 on H100 to cut memory (no GradScaler issues)
-  generation_max_length: 64           # shorter to reduce KV cache during eval
+  generation_max_length: 256          # allow full transcript + intent JSON in generation
 
 inference:
   max_new_tokens: 128

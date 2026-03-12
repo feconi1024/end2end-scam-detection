@@ -165,6 +165,10 @@ class WhisperCollator:
         audios_torch: List[Tensor] = [b["audio"] for b in batch]
         audios = [a.cpu().numpy() for a in audios_torch]
         labels = torch.tensor([b["label"] for b in batch], dtype=torch.long)
+        audio_durations = torch.tensor(
+            [a.numel() / float(self.sample_rate) for a in audios_torch],
+            dtype=torch.float32,
+        )
 
         # Use the full WhisperProcessor so that input_features are padded/
         # truncated to the fixed length expected by the Whisper encoder
@@ -212,6 +216,7 @@ class WhisperCollator:
             "labels": labels,
             "ctc_targets": ctc_targets,
             "ctc_target_lengths": ctc_target_lengths,
+            "audio_durations": audio_durations,
         }
 
 

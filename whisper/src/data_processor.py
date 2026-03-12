@@ -221,8 +221,8 @@ def load_and_prepare_datasets(
     processed = dataset_dict.map(
         mapping_fn,
         remove_columns=[
-            # Keep audio column; drop everything else except labels.
-            col for col in dataset_dict[train_split].column_names if col not in ("audio", "labels")
+            # Keep audio + original label + generated labels.
+            col for col in dataset_dict[train_split].column_names if col not in ("audio", "label", "labels")
         ],
         num_proc=num_proc,
     )

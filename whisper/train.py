@@ -86,10 +86,30 @@ def main() -> int:
         num_proc=args.num_proc,
     )
 
-    # Subsample eval set to avoid OOM during generation (eval is memory-heavy).
+    # Subsample eval set to avoid OOM during generation (eval is memory-heavy),
+    # and stratify to get a roughly balanced scam/non_scam mix if labels exist.
     max_eval_samples = int(training_cfg.get("max_eval_samples", 0))
     if max_eval_samples > 0 and len(eval_dataset) > max_eval_samples:
-        eval_dataset = eval_dataset.select(range(max_eval_samples))
+        if "label" in eval_dataset.column_names:
+            labels = eval_dataset["label"]
+            scam_indices = [i for i, y in enumerate(labels) if y == "scam"]
+            non_indices = [i for i, y in enumerate(labels) if y == "non_scam"]
+            per_class = max_eval_samples // 2
+            selected = scam_indices[:per_class] + non_indices[:per_class]
+            # If we don't have enough of one class, fill from the other.
+            if len(selected) < max_eval_samples:
+                remaining = max_eval_samples - len(selected)
+                extra = (
+                    scam_indices[per_class : per_class + remaining]
+                    + non_indices[per_class : per_class + remaining]
+                )
+                selected += extra[:remaining]
+            if selected:
+                eval_dataset = eval_dataset.select(selected)
+            else:
+                eval_dataset = eval_dataset.select(range(max_eval_samples))
+        else:
+            eval_dataset = eval_dataset.select(range(max_eval_samples))
 
     model = initialize_whislu_model(
         model_name=model_name,

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
-import librosa
+import math
 import torch
 from torch import Tensor
 from torch.utils.data import Dataset
@@ -159,6 +159,9 @@ class WhisperCollator:
         self.processor = processor
         self.pad_token_id = pad_token_id
         self.sample_rate = sample_rate
+        self.hop_length = int(
+            getattr(getattr(processor, "feature_extractor", None), "hop_length", 160)
+        )
 
     def __call__(self, batch: Sequence[Dict[str, Any]]) -> Dict[str, Tensor]:
         # Waveforms (list of 1D tensors) -> list of 1D numpy arrays
@@ -179,12 +182,16 @@ class WhisperCollator:
             return_tensors="pt",
         )
         input_features: Tensor = processed.input_features  # (B, n_mels, T_acoustic)
-        # WhisperProcessor already handles padding/truncation; we treat all
-        # frames as valid here.
         bsz, _, t_acoustic = input_features.shape
-        audio_attention_mask: Tensor = torch.ones(
-            (bsz, t_acoustic), dtype=torch.long
-        )
+        # Build a correct attention mask so padding isn't treated as speech.
+        # Whisper uses hop_length=160 at 16kHz, i.e. 10ms per frame.
+        # valid_frames ≈ ceil(num_samples / hop_length), clipped to T_acoustic.
+        audio_attention_mask = torch.zeros((bsz, t_acoustic), dtype=torch.long)
+        for i, wav in enumerate(audios_torch):
+            valid_frames = int(math.ceil(wav.numel() / float(self.hop_length)))
+            valid_frames = max(0, min(t_acoustic, valid_frames))
+            if valid_frames > 0:
+                audio_attention_mask[i, :valid_frames] = 1
 
         # CTC targets from tokenized transcripts
         token_seqs: List[Tensor] = [

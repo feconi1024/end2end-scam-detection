@@ -109,7 +109,16 @@ class Trainer:
         projected_attention_mask = outputs["projected_attention_mask"]
 
         # CTC input lengths are derived from the downsampled attention mask
-        ctc_input_lengths = projected_attention_mask.long().sum(dim=1)
+        if projected_attention_mask is None:
+            # Fall back to full length if mask is unavailable
+            ctc_input_lengths = torch.full(
+                (ctc_logits.size(0),),
+                fill_value=ctc_logits.size(1),
+                dtype=torch.long,
+                device=ctc_logits.device,
+            )
+        else:
+            ctc_input_lengths = projected_attention_mask.long().sum(dim=1)
 
         loss_dict = self.loss_fn(
             classification_logits=classification_logits,

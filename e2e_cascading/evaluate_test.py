@@ -42,6 +42,18 @@ def main() -> None:
         required=True,
         help="Path to model checkpoint (.pt) to evaluate.",
     )
+    parser.add_argument(
+        "--latency_num_workers",
+        type=int,
+        default=0,
+        help="Num workers to use for latency measurement (default: 0 for true end-to-end timing).",
+    )
+    parser.add_argument(
+        "--warmup_batches",
+        type=int,
+        default=2,
+        help="Warmup batches to run (excluded from timing) to avoid first-batch overhead.",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -78,9 +90,12 @@ def main() -> None:
         sample_rate=sr,
     )
 
-    # DataLoader workers: 0 on Windows, config value on Linux/Slurm.
-    _requested_workers = int(cfg["training"].get("num_workers", 4))
-    num_workers = 0 if platform.system() == "Windows" else _requested_workers
+    # For end-to-end latency (disk I/O + feature extraction + model), default to
+    # single-process DataLoader timing by using num_workers=0.
+    if platform.system() == "Windows":
+        num_workers = 0
+    else:
+        num_workers = int(args.latency_num_workers)
     batch_size = int(cfg["training"]["batch_size"])
 
     test_loader = DataLoader(
@@ -122,10 +137,25 @@ def main() -> None:
     all_labels: List[int] = []
     all_preds: List[int] = []
     total_infer_time = 0.0
+    total_e2e_time = 0.0
     total_audio_seconds = 0.0
 
     with torch.no_grad():
+        # Warmup (excluded from timing)
+        for _i, batch in enumerate(test_loader):
+            if _i >= args.warmup_batches:
+                break
+            _ = model(
+                input_features=batch["input_features"].to(device),
+                audio_attention_mask=batch["audio_attention_mask"].to(device),
+            )
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+
+        # Full end-to-end timing includes waiting for DataLoader + preprocessing
+        start_e2e = time.perf_counter()
         for batch in test_loader:
+            start_batch = time.perf_counter()
             input_features = batch["input_features"].to(device)
             audio_attention_mask = batch["audio_attention_mask"].to(device)
             labels = batch["labels"].to(device)
@@ -143,12 +173,17 @@ def main() -> None:
                 torch.cuda.synchronize()
             end = time.perf_counter()
             total_infer_time += end - start
+            total_e2e_time += time.perf_counter() - start_batch
 
             logits = outputs["classification_logits"]
             preds = logits.argmax(dim=-1)
 
             all_labels.extend(labels.cpu().tolist())
             all_preds.extend(preds.cpu().tolist())
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        end_e2e = time.perf_counter()
+        total_e2e_time = max(total_e2e_time, end_e2e - start_e2e)
 
     if len(all_labels) == 0:
         print("No test examples found.")
@@ -164,9 +199,15 @@ def main() -> None:
         latency_per_min = float("nan")
 
     print(f"Test F1 ({avg_mode}): {f1:.4f}")
-    print(f"Total inference time (forward pass only): {total_infer_time:.3f} s")
+    print(f"Total inference time (model forward only): {total_infer_time:.3f} s")
+    print(f"Total end-to-end time (data + features + model): {total_e2e_time:.3f} s")
     print(f"Total audio duration: {audio_minutes:.3f} min")
-    print(f"Latency: {latency_per_min:.3f} s per minute of audio")
+    if audio_minutes > 0:
+        latency_per_min_e2e = total_e2e_time / audio_minutes
+    else:
+        latency_per_min_e2e = float("nan")
+    print(f"Latency (forward-only): {latency_per_min:.3f} s per minute of audio")
+    print(f"Latency (end-to-end): {latency_per_min_e2e:.3f} s per minute of audio")
 
 
 if __name__ == "__main__":

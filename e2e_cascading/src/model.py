@@ -63,6 +63,11 @@ class DifferentiableCascadeModel(nn.Module):
                     setattr(base_proj_cfg, k, v)
         self.projector = ModalityProjector(base_proj_cfg)
 
+        # Learnable [CLS] embedding for BERT-style pooling on token 0.
+        # Without this, BERT would pool from the first acoustic frame.
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, semantic_dim))
+        nn.init.normal_(self.cls_token, mean=0.0, std=0.02)
+
         # CTC head maps projector output to tokenizer vocabulary
         self.ctc_head = nn.Linear(semantic_dim, ctc_vocab_size)
         self.ctc_blank_id = int(ctc_blank_id)
@@ -96,11 +101,22 @@ class DifferentiableCascadeModel(nn.Module):
             hidden_states, attention_mask=audio_attention_mask
         )  # (B, T_semantic, semantic_dim), (B, T_semantic)
 
+        # Prepend a learnable [CLS] token so BERT pools from index 0.
+        bsz = soft_embeddings.size(0)
+        cls = self.cls_token.expand(bsz, -1, -1)  # (B, 1, semantic_dim)
+        soft_embeddings_for_bert = torch.cat([cls, soft_embeddings], dim=1)
+
+        if projected_attention_mask is None:
+            bert_attention_mask = None
+        else:
+            cls_mask = projected_attention_mask.new_ones((bsz, 1))
+            bert_attention_mask = torch.cat([cls_mask, projected_attention_mask], dim=1)
+
         # Semantic decoder using inputs_embeds to preserve differentiability.
-        # We do not pass an attention_mask here to avoid shape mismatches
-        # between Whisper time steps and the projected sequence length.
+        # Pass the projected attention mask so padding is ignored.
         decoder_outputs = self.semantic_decoder(
-            inputs_embeds=soft_embeddings,
+            inputs_embeds=soft_embeddings_for_bert,
+            attention_mask=bert_attention_mask,
             return_dict=True,
         )
         classification_logits: Tensor = decoder_outputs.logits  # (B, num_labels)
@@ -111,6 +127,6 @@ class DifferentiableCascadeModel(nn.Module):
         return {
             "classification_logits": classification_logits,
             "ctc_logits": ctc_logits,
-            "projected_attention_mask": projected_attention_mask,
+            "projected_attention_mask": bert_attention_mask,
         }
 

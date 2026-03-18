@@ -107,7 +107,16 @@ def prepare_dataset_mapping_fn(
             add_special_tokens=False,
         )
 
-        batch["labels"] = tokenized["input_ids"]
+        # Whisper's decoder has a hard maximum sequence length of 448 tokens.
+        # Truncate labels to fit, ensuring the sequence still ends with EOS
+        # so the model learns to stop generating.
+        max_label_len = 448
+        ids = tokenized["input_ids"]
+        if len(ids) > max_label_len:
+            eos_id = tokenizer.eos_token_id
+            ids = ids[: max_label_len - 1] + [eos_id]
+
+        batch["labels"] = ids
         return batch
 
     return _map_batch

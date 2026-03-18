@@ -19,6 +19,7 @@ training:
   max_eval_samples: 1000              # increased for a more stable evaluation
   num_train_epochs: 3
   learning_rate: 5.0e-5
+  weight_decay: 0.01
   warmup_steps: 500
   logging_steps: 50
   save_steps: 2000

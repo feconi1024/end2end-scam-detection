@@ -94,9 +94,13 @@ def prepare_dataset_mapping_fn(
 
         json_str = json.dumps(json_obj, ensure_ascii=False)
 
-        bos = tokenizer.bos_token or "<|startoftranscript|>"
+        # Do NOT include BOS (<|startoftranscript|>) in labels.
+        # Whisper's forward() automatically prepends decoder_start_token_id (= BOS)
+        # when creating decoder_input_ids from labels via right-shift.
+        # Including BOS here would create a double-BOS: [BOS, BOS, json..., EOS],
+        # wasting capacity and causing a train/generation mismatch.
         eos = tokenizer.eos_token or "<|endoftext|>"
-        target_text = f"{bos}{json_str}{eos}"
+        target_text = f"{json_str}{eos}"
 
         tokenized = tokenizer(
             target_text,

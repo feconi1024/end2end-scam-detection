@@ -62,6 +62,8 @@ def main():
     if getattr(model, "generation_config", None) is not None:
         model.generation_config.forced_decoder_ids = None
         model.generation_config.suppress_tokens = []
+        if hasattr(model.generation_config, "begin_suppress_tokens"):
+            model.generation_config.begin_suppress_tokens = []
 
     compute_metrics = build_compute_metrics_fn(
         processor=processor,

@@ -33,8 +33,18 @@ def initialize_whislu_model(
 
     # Disable Whisper's default forced decoder ids and token suppression so that
     # the model is free to emit custom JSON immediately after <|startoftranscript|>.
+    # IMPORTANT: Must clear BOTH model.config AND model.generation_config, because
+    # model.generate() reads from generation_config, not model.config.
     model.config.forced_decoder_ids = None
     model.config.suppress_tokens = []
+
+    if hasattr(model, "generation_config"):
+        model.generation_config.forced_decoder_ids = None
+        model.generation_config.suppress_tokens = []
+        # Also clear begin_suppress_tokens which can suppress JSON-critical tokens
+        # like '{' and '"' at the start of generation.
+        if hasattr(model.generation_config, "begin_suppress_tokens"):
+            model.generation_config.begin_suppress_tokens = []
 
     # Enable gradient checkpointing to significantly reduce memory usage.
     model.config.use_cache = False
@@ -64,6 +74,12 @@ def load_whislu_for_inference(
 
     model.config.forced_decoder_ids = None
     model.config.suppress_tokens = []
+
+    if hasattr(model, "generation_config"):
+        model.generation_config.forced_decoder_ids = None
+        model.generation_config.suppress_tokens = []
+        if hasattr(model.generation_config, "begin_suppress_tokens"):
+            model.generation_config.begin_suppress_tokens = []
 
     model.eval()
     return model

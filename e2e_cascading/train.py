@@ -77,18 +77,21 @@ def main() -> None:
         manifest_path=train_manifest,
         tokenizer=tokenizer,
         sample_rate=sr,
+        split="train",
         label_mapping=label_mapping,
     )
     val_ds = TeleAntiFraudDataset(
         manifest_path=val_manifest,
         tokenizer=tokenizer,
         sample_rate=sr,
+        split="val",
         label_mapping=label_mapping,
     )
     test_ds = TeleAntiFraudDataset(
         manifest_path=test_manifest,
         tokenizer=tokenizer,
         sample_rate=sr,
+        split="test",
         label_mapping=label_mapping,
     )
 

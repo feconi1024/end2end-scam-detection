@@ -141,11 +141,12 @@ class DifferentiableCascadeModel(nn.Module):
             cls_mask = projected_attention_mask.new_ones((bsz, 1))
             bert_attention_mask = torch.cat([cls_mask, projected_attention_mask], dim=1)
 
-        # Semantic decoder using inputs_embeds to preserve differentiability.
-        # Pass the projected attention mask so padding is ignored.
+        # --- ABLATION FIX: Prevent length leakage ---
+        # Intentionally do not pass the attention mask to the semantic decoder.
+        # This prevents BERT from exploiting exact sequence length as a shortcut.
         decoder_outputs = self.semantic_decoder(
             inputs_embeds=soft_embeddings_for_bert,
-            attention_mask=bert_attention_mask,
+            attention_mask=None,
             return_dict=True,
         )
         classification_logits: Tensor = decoder_outputs.logits  # (B, num_labels)

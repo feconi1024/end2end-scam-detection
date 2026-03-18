@@ -16,6 +16,7 @@ class JointCTCSLULoss(nn.Module):
         ctc_blank_id: int,
         ctc_weight: float = 0.3,
         slu_weight: float = 0.7,
+        class_weights: Optional[Tensor] = None,
     ) -> None:
         super().__init__()
         self.ctc_weight = float(ctc_weight)
@@ -25,7 +26,9 @@ class JointCTCSLULoss(nn.Module):
             blank=ctc_blank_id,
             zero_infinity=True,
         )
-        self.ce_loss_fn = nn.CrossEntropyLoss()
+        self.ce_loss_fn = nn.CrossEntropyLoss(
+            weight=class_weights,
+        )
 
     def forward(
         self,

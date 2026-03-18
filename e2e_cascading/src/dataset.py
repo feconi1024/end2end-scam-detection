@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import math
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.data import Dataset
 import torchaudio
@@ -134,6 +135,26 @@ class TeleAntiFraudDataset(Dataset):
                 f"substituting silence. path={path_str}, error={repr(e_torch)}"
             )
             audio_tensor = torch.zeros(self.sample_rate, dtype=torch.float32)
+
+        # --- FIX: True Length Ablation ---
+        # Force every audio sample to exactly 15 seconds to remove length leakage.
+        target_length = self.sample_rate * 15
+        if audio_tensor.size(0) > target_length:
+            if self.split == "train":
+                max_start = audio_tensor.size(0) - target_length
+                start = int(torch.randint(0, max_start + 1, (1,)).item())
+            else:
+                start = 0
+            audio_tensor = audio_tensor[start : start + target_length]
+        else:
+            pad_amount = target_length - audio_tensor.size(0)
+            if pad_amount > 0:
+                audio_tensor = F.pad(audio_tensor, (0, pad_amount))
+
+        # --- AUGMENTATION FIX: Destroy TTS artifacts during training ---
+        if self.split == "train":
+            noise_amp = 0.005 * torch.rand(1).item()
+            audio_tensor = audio_tensor + noise_amp * torch.randn_like(audio_tensor)
 
         label_id = self.label2id[ex.label_str]
 

@@ -30,7 +30,7 @@ model:
   ctc_blank_token_id: 0
 
   # Iterative freezing configuration
-  freeze_epochs: 3        # Phase 1: freeze audio encoder for first N epochs
+  freeze_epochs: 1        # Phase 1: freeze audio encoder for first N epochs
   audio_unfreeze_num_layers: 4  # Number of top encoder layers to unfreeze
 
 training:
@@ -38,11 +38,15 @@ training:
   batch_size: 4
   learning_rate: 3.0e-5
   weight_decay: 0.01
-  lr_after_unfreeze_factor: 0.1
-  gradient_accumulation_steps: 1
+  lr_after_unfreeze_factor: 0.5
+  gradient_accumulation_steps: 8   # effective batch size = 4 * 8 = 32
 
   ctc_weight: 0.3
   slu_weight: 0.7
+
+  # Training stability
+  max_grad_norm: 1.0
+  warmup_ratio: 0.05     # 5% of total steps for linear warmup
 
   device: "cuda"   # "cuda" or "cpu"; respects CUDA_VISIBLE_DEVICES on Linux/Slurm
   # num_workers: on Linux/Slurm this value is used; on Windows it is overridden to 0.

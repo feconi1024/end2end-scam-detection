@@ -48,12 +48,14 @@ class TeleAntiFraudDataset(Dataset):
         manifest_path: Union[str, Path],
         tokenizer,
         sample_rate: int,
+        split: str = "train",
         label_mapping: Optional[Dict[str, int]] = None,
     ) -> None:
         import csv
 
         self.manifest_path = Path(manifest_path)
         self.sample_rate = int(sample_rate)
+        self.split = str(split).lower()
         self.tokenizer = tokenizer
 
         self.examples: List[TeleAntiFraudExample] = []
@@ -118,6 +120,10 @@ class TeleAntiFraudDataset(Dataset):
                     waveform, sr, self.sample_rate
                 )
             audio_tensor = waveform.squeeze(0).float()
+            # --- AUGMENTATION FIX: Destroy TTS artifacts during training ---
+            if self.split == "train":
+                noise_amp = 0.005 * torch.rand(1).item()
+                audio_tensor = audio_tensor + noise_amp * torch.randn_like(audio_tensor)
         except Exception as e_torch:
             # Substitute 1 second of silence so that a handful of unreadable
             # files do not abort training. We avoid a secondary librosa-based

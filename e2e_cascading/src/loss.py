@@ -67,10 +67,12 @@ class JointCTCSLULoss(nn.Module):
                 ctc_input_lengths,
                 ctc_target_lengths,
             )
+            total_loss = self.ctc_weight * ctc_loss + self.slu_weight * slu_loss
         else:
             ctc_loss = classification_logits.new_tensor(0.0)
-
-        total_loss = self.ctc_weight * ctc_loss + self.slu_weight * slu_loss
+            # No CTC targets: use unweighted classification loss so that the
+            # effective learning rate is not silently reduced by slu_weight.
+            total_loss = slu_loss
 
         return {
             "loss": total_loss,

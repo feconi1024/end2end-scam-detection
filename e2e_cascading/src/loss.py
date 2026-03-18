@@ -57,9 +57,11 @@ class JointCTCSLULoss(nn.Module):
             # Prepare shapes for nn.CTCLoss: (T, N, C)
             log_probs = ctc_logits.log_softmax(dim=-1).transpose(0, 1)  # (T, B, vocab)
 
-            # Flatten padded targets to 1D
-            # Only the first target_lengths[i] of each row will be used.
-            targets_flat = ctc_targets.contiguous().view(-1)
+            # Concatenate only the valid (non-padding) tokens from each row.
+            # nn.CTCLoss expects len(targets_flat) == sum(ctc_target_lengths).
+            targets_flat = torch.cat(
+                [ctc_targets[i, :ctc_target_lengths[i]] for i in range(ctc_targets.size(0))]
+            )
 
             ctc_loss = self.ctc_loss_fn(
                 log_probs,

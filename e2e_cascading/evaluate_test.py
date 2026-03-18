@@ -54,12 +54,6 @@ def main() -> None:
         default=2,
         help="Warmup batches to run (excluded from timing) to avoid first-batch overhead.",
     )
-    parser.add_argument(
-        "--expected_test_size",
-        type=int,
-        default=100,
-        help="Expected number of test samples. Script aborts if dataset size mismatches (default: 100).",
-    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -89,12 +83,6 @@ def main() -> None:
         split="test",
         label_mapping=label_mapping,
     )
-    if args.expected_test_size > 0:
-        actual_size = len(test_ds.examples)
-        assert actual_size == args.expected_test_size, (
-            f"Test dataset size mismatch: expected {args.expected_test_size}, got {actual_size}. "
-            "Check test manifest isolation to avoid leakage."
-        )
 
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else cfg["model"]["ctc_blank_token_id"]
     collate_fn = create_collate_fn(

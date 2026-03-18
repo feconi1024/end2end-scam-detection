@@ -165,6 +165,8 @@ class TeleAntiFraudDataset(Dataset):
                 add_special_tokens=False,
                 return_attention_mask=False,
                 return_token_type_ids=False,
+                truncation=True,
+                max_length=448,
             )
             token_ids = torch.tensor(encoded["input_ids"], dtype=torch.long)
 

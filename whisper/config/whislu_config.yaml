@@ -32,5 +32,5 @@ training:
   generation_max_length: 448          # match Whisper's max decoder length so eval can generate full JSON
 
 inference:
-  max_new_tokens: 448
+  max_new_tokens: 445                 # 448 minus 3 prefix tokens (SOT + lang + task) that Whisper prepends
   intent_only_max_new_tokens: 8

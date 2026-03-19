@@ -45,6 +45,12 @@ def initialize_whislu_model(
         # like '{' and '"' at the start of generation.
         if hasattr(model.generation_config, "begin_suppress_tokens"):
             model.generation_config.begin_suppress_tokens = []
+        # Whisper's custom generate() reconstructs forced_decoder_ids from
+        # language/task/is_multilingual even when forced_decoder_ids is None.
+        # Clear these so the decoder is truly free to emit JSON from the start.
+        model.generation_config.language = None
+        model.generation_config.task = None
+        model.generation_config.is_multilingual = False
 
     # Enable gradient checkpointing to significantly reduce memory usage.
     model.config.use_cache = False
@@ -80,6 +86,9 @@ def load_whislu_for_inference(
         model.generation_config.suppress_tokens = []
         if hasattr(model.generation_config, "begin_suppress_tokens"):
             model.generation_config.begin_suppress_tokens = []
+        model.generation_config.language = None
+        model.generation_config.task = None
+        model.generation_config.is_multilingual = False
 
     model.eval()
     return model

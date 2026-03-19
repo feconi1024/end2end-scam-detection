@@ -94,27 +94,26 @@ def prepare_dataset_mapping_fn(
 
         json_str = json.dumps(json_obj, ensure_ascii=False)
 
-        # Do NOT include BOS (<|startoftranscript|>) in labels.
-        # Whisper's forward() automatically prepends decoder_start_token_id (= BOS)
-        # when creating decoder_input_ids from labels via right-shift.
-        # Including BOS here would create a double-BOS: [BOS, BOS, json..., EOS],
-        # wasting capacity and causing a train/generation mismatch.
-        eos = tokenizer.eos_token or "<|endoftext|>"
-        target_text = f"{json_str}{eos}"
-
+        # Tokenize the JSON text ONLY — do NOT embed special token strings
+        # (like <|endoftext|>) in the text.  The Whisper fast tokenizer does
+        # not recognise special-token strings inside input text when
+        # add_special_tokens=False; it would BPE-encode "<|endoftext|>" as
+        # regular characters instead of the single token ID 50257, so the
+        # model would never learn to produce the real EOS and would loop
+        # until max_length during generation.
         tokenized = tokenizer(
-            target_text,
+            json_str,
             add_special_tokens=False,
         )
 
+        # Manually append the real EOS token ID.
+        ids = tokenized["input_ids"] + [tokenizer.eos_token_id]
+
         # Whisper's decoder has a hard maximum sequence length of 448 tokens.
-        # Truncate labels to fit, ensuring the sequence still ends with EOS
-        # so the model learns to stop generating.
+        # Truncate labels to fit, ensuring the sequence still ends with EOS.
         max_label_len = 448
-        ids = tokenized["input_ids"]
         if len(ids) > max_label_len:
-            eos_id = tokenizer.eos_token_id
-            ids = ids[: max_label_len - 1] + [eos_id]
+            ids = ids[: max_label_len - 1] + [tokenizer.eos_token_id]
 
         batch["labels"] = ids
         return batch
@@ -349,8 +348,12 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         )
 
         labels = labels_batch["input_ids"]
-        # Replace padding token id's with -100 so they are ignored by loss
-        labels[labels == self.processor.tokenizer.pad_token_id] = -100
+        # Mask padding positions with -100 so they are ignored by the loss.
+        # IMPORTANT: use the attention mask, NOT token-ID comparison.
+        # For Whisper pad_token_id == eos_token_id (both 50257), so comparing
+        # by ID would also mask the legitimate EOS at the end of each label
+        # sequence — the model would never learn to stop generating.
+        labels = labels.masked_fill(labels_batch.attention_mask.ne(1), -100)
         batch["labels"] = labels
         return batch
 

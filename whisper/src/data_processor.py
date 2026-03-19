@@ -70,6 +70,22 @@ def prepare_dataset_mapping_fn(
     default_domain = str(config.get("domain", "telephony"))
     intent_only: bool = bool(config.get("train_intent_only", False))
 
+    # Whisper decoder hard maximum.
+    MAX_LABEL_TOKENS = 448
+
+    # Pre-compute the token overhead of the JSON envelope (everything except
+    # the transcript body).  We tokenize once with an empty "Text" field so
+    # that we know exactly how many tokens are available for the transcript.
+    if not intent_only:
+        _envelope = json.dumps(
+            {"Intent": "", "Domain": default_domain, "Text": ""},
+            ensure_ascii=False,
+        )
+        _envelope_ids = tokenizer(_envelope, add_special_tokens=False)["input_ids"]
+        # +1 for the EOS token we append; +3 safety margin for BPE boundary
+        # effects when the transcript is re-encoded inside the JSON context.
+        _envelope_overhead = len(_envelope_ids) + 1 + 3
+
     def _map_batch(batch: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
         # Ground truth label (single-label classification)
         raw_label = batch.get(label_column)
@@ -78,14 +94,28 @@ def prepare_dataset_mapping_fn(
         intent = str(raw_label) if raw_label is not None else ""
 
         if intent_only:
-            json_obj = {
-                "Intent": intent,
-            }
+            json_obj = {"Intent": intent}
         else:
-            # Ground truth transcript text
             txt_col = text_column or "transcript"
             transcript = batch.get(txt_col) or ""
-            # Put Intent first in the JSON so its tokens are predicted early.
+
+            # --- Compress transcript to fit within the 448-token budget ---
+            # Tokenize the transcript in isolation and truncate to the
+            # available budget, then decode back to text.  This guarantees
+            # the final JSON is always structurally complete (closing `"}`
+            # are never cut off) while preserving as much semantic content
+            # as the token budget allows.
+            text_budget = max(0, MAX_LABEL_TOKENS - _envelope_overhead)
+            if transcript:
+                text_ids = tokenizer(
+                    transcript, add_special_tokens=False
+                )["input_ids"]
+                if len(text_ids) > text_budget:
+                    text_ids = text_ids[:text_budget]
+                    transcript = tokenizer.decode(
+                        text_ids, skip_special_tokens=True
+                    )
+
             json_obj = {
                 "Intent": intent,
                 "Domain": default_domain,
@@ -101,19 +131,30 @@ def prepare_dataset_mapping_fn(
         # regular characters instead of the single token ID 50257, so the
         # model would never learn to produce the real EOS and would loop
         # until max_length during generation.
-        tokenized = tokenizer(
-            json_str,
-            add_special_tokens=False,
-        )
+        ids = tokenizer(json_str, add_special_tokens=False)["input_ids"]
 
         # Manually append the real EOS token ID.
-        ids = tokenized["input_ids"] + [tokenizer.eos_token_id]
+        ids = ids + [tokenizer.eos_token_id]
 
-        # Whisper's decoder has a hard maximum sequence length of 448 tokens.
-        # Truncate labels to fit, ensuring the sequence still ends with EOS.
-        max_label_len = 448
-        if len(ids) > max_label_len:
-            ids = ids[: max_label_len - 1] + [tokenizer.eos_token_id]
+        # Final safety: if BPE re-tokenization made the sequence slightly
+        # longer than expected, trim transcript tokens from the end while
+        # keeping the JSON envelope intact.  In practice the 3-token safety
+        # margin above makes this a no-op.
+        if len(ids) > MAX_LABEL_TOKENS:
+            # The JSON closing '"}' is the last ~2 tokens before EOS.
+            # Rebuild with a tighter budget rather than blindly truncating.
+            if not intent_only and transcript:
+                excess = len(ids) - MAX_LABEL_TOKENS
+                tighter_budget = max(0, text_budget - excess - 2)
+                text_ids = tokenizer(
+                    batch.get(text_column or "transcript") or "",
+                    add_special_tokens=False,
+                )["input_ids"][:tighter_budget]
+                trimmed = tokenizer.decode(text_ids, skip_special_tokens=True)
+                json_obj["Text"] = trimmed
+                json_str = json.dumps(json_obj, ensure_ascii=False)
+                ids = tokenizer(json_str, add_special_tokens=False)["input_ids"]
+                ids = ids + [tokenizer.eos_token_id]
 
         batch["labels"] = ids
         return batch

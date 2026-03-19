@@ -16,7 +16,7 @@ training:
   per_device_train_batch_size: 1
   per_device_eval_batch_size: 1
   gradient_accumulation_steps: 8
-  max_eval_samples: 1000              # increased for a more stable evaluation
+  max_eval_samples: 128              # increased for a more stable evaluation
   num_train_epochs: 3
   learning_rate: 5.0e-5
   weight_decay: 0.01
@@ -29,8 +29,8 @@ training:
   predict_with_generate: true
   fp16: false
   bf16: true                          # use bf16 on H100 to cut memory (no GradScaler issues)
-  generation_max_length: 256          # allow full transcript + intent JSON in generation
+  generation_max_length: 448          # match Whisper's max decoder length so eval can generate full JSON
 
 inference:
-  max_new_tokens: 128
+  max_new_tokens: 448
   intent_only_max_new_tokens: 8

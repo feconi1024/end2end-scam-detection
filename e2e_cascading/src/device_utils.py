@@ -1,33 +1,37 @@
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 
 
 def resolve_runtime_device(requested_device: str, verbose: bool = True) -> str:
     """
-    Normalize the requested runtime device without eagerly touching CUDA.
+    Resolve the runtime device without relying on torch.cuda.is_available().
 
-    We intentionally avoid `torch.cuda.is_available()` and any test allocation
-    here. Both can trigger fragile early CUDA initialization on some clusters
-    and lead to false CPU fallbacks. If the user requests CUDA, we keep that
-    request and let the real `model.to(device)` path either succeed or raise a
-    clear error instead of silently training on CPU for hours.
+    On some cluster setups, calling `torch.cuda.is_available()` can trigger a
+    fragile cudaGetDeviceCount path that emits warnings and incorrectly causes
+    a CPU fallback. Instead, we try a tiny allocation on the requested device.
     """
 
     device_str = str(requested_device).lower()
-    if device_str.startswith("cuda"):
-        if verbose:
-            if torch.backends.cuda.is_built():
-                print(f"Requested runtime device: '{device_str}'.")
-            else:
-                print(
-                    "Requested runtime device starts with 'cuda', but this "
-                    "PyTorch build reports no CUDA support. Initialization "
-                    "will fail unless you switch training.device to 'cpu'."
-                )
+    if not device_str.startswith("cuda"):
         return device_str
 
-    if verbose:
-        print(f"Requested runtime device: '{device_str}'.")
-    return device_str
+    if not torch.backends.cuda.is_built():
+        if verbose:
+            print("PyTorch was built without CUDA support; using device='cpu'.")
+        return "cpu"
+
+    try:
+        probe = torch.empty(1, device=torch.device(device_str))
+        del probe
+        return device_str
+    except Exception as exc:
+        if verbose:
+            print(
+                f"CUDA initialization failed for device='{device_str}'; "
+                f"using device='cpu'. Error: {exc}"
+            )
+        return "cpu"
 

@@ -55,9 +55,11 @@ class Trainer:
             lr=cfg.learning_rate,
             weight_decay=cfg.weight_decay,
         )
-        self.grad_scaler = torch.cuda.amp.GradScaler(
-            enabled=self.device.type == "cuda" and self.mixed_precision == "fp16"
-        )
+        self.grad_scaler: Optional[torch.amp.GradScaler]
+        if self.device.type == "cuda" and self.mixed_precision == "fp16":
+            self.grad_scaler = torch.amp.GradScaler("cuda")
+        else:
+            self.grad_scaler = None
 
         # LR scheduler: linear warmup + cosine decay
         total_steps = steps_per_epoch * cfg.num_epochs
@@ -135,6 +137,9 @@ class Trainer:
             return torch.autocast(device_type="cuda", dtype=torch.float16)
         return nullcontext()
 
+    def _use_grad_scaler(self) -> bool:
+        return self.grad_scaler is not None
+
     def _forward_batch(self, batch: Dict[str, Tensor]) -> Tuple[Dict[str, Tensor], Dict[str, Tensor]]:
         input_features = batch["input_features"].to(self.device)
         audio_attention_mask = batch["audio_attention_mask"].to(self.device)
@@ -189,16 +194,16 @@ class Trainer:
             _, loss_dict = self._forward_batch(batch)
 
             loss = loss_dict["loss"] / accum
-            if self.grad_scaler.is_enabled():
+            if self._use_grad_scaler():
                 self.grad_scaler.scale(loss).backward()
             else:
                 loss.backward()
 
             if step % accum == 0 or step == len(dataloader):
-                if self.grad_scaler.is_enabled():
+                if self._use_grad_scaler():
                     self.grad_scaler.unscale_(self.optimizer)
                 nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.max_grad_norm)
-                if self.grad_scaler.is_enabled():
+                if self._use_grad_scaler():
                     self.grad_scaler.step(self.optimizer)
                     self.grad_scaler.update()
                 else:

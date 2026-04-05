@@ -1,6 +1,8 @@
 TeleAntiFraud-28k/TeleAntiFraud-28k/*
 sample_100_balanced/*
 *.csv
+AGENTS.md
+CLAUDE.md
 
 __pycache__/*
 *.pyc

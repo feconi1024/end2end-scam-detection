@@ -28,6 +28,7 @@ model:
 
   # CTC configuration
   ctc_blank_token_id: 0
+  ctc_min_char_freq: 1
 
   # Iterative freezing configuration
   freeze_epochs: 1        # Phase 1: freeze audio encoder for first N epochs
@@ -47,6 +48,7 @@ training:
   # Training stability
   max_grad_norm: 1.0
   warmup_ratio: 0.05     # 5% of total steps for linear warmup
+  mixed_precision: "bf16"
 
   device: "cuda"   # "cuda" or "cpu"; respects CUDA_VISIBLE_DEVICES on Linux/Slurm
   # num_workers: on Linux/Slurm this value is used; on Windows it is overridden to 0.

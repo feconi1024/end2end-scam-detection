@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 from typing import Dict, Any
 
-import librosa
 import torch
 from transformers import WhisperProcessor, BertTokenizer
 
-from e2e_cascading.src.dataset import load_config
+from e2e_cascading.src.dataset import CharCTCTokenizer, load_config, prepare_audio_tensor
 from e2e_cascading.src.model import DifferentiableCascadeModel
 
 
@@ -25,7 +25,8 @@ def run_inference(
     sample_rate = int(cfg["dataset"]["sample_rate"])
 
     processor = WhisperProcessor.from_pretrained(whisper_name)
-    tokenizer = BertTokenizer.from_pretrained(bert_name)
+    BertTokenizer.from_pretrained(bert_name)
+    feature_extractor = getattr(processor, "feature_extractor", processor)
 
     # Label mapping must match training
     scam_label = cfg["dataset"]["scam_label"]
@@ -34,8 +35,20 @@ def run_inference(
     id2label = {v: k for k, v in label_mapping.items()}
 
     num_labels = int(cfg["model"]["num_labels"])
-    ctc_vocab_size = tokenizer.vocab_size
     ctc_blank_id = int(cfg["model"]["ctc_blank_token_id"])
+    ctc_min_char_freq = int(cfg["model"].get("ctc_min_char_freq", 1))
+    config_dir = config_path.resolve().parent
+    repo_root = config_dir.parent.parent
+    train_manifest = cfg["dataset"]["train_manifest"]
+    train_manifest_path = Path(train_manifest)
+    if not train_manifest_path.is_absolute():
+        train_manifest_path = (repo_root / train_manifest_path).resolve()
+    ctc_tokenizer = CharCTCTokenizer.build_from_manifest(
+        train_manifest_path,
+        blank_token_id=ctc_blank_id,
+        min_char_freq=ctc_min_char_freq,
+    )
+    ctc_vocab_size = ctc_tokenizer.vocab_size
 
     projector_cfg_overrides = cfg["model"].get("projector", {})
 
@@ -61,18 +74,32 @@ def run_inference(
     device = torch.device(device_str)
     model.to(device)
 
-    # Load and preprocess audio
-    audio, sr = librosa.load(audio_path.as_posix(), sr=sample_rate, mono=True)
+    dataset_cfg = cfg.get("dataset", {})
+    fixed_duration_seconds = float(dataset_cfg.get("fixed_duration_seconds", 15.0))
+    train_noise_max_amp = float(dataset_cfg.get("train_noise_max_amp", 0.005))
+
+    # Reuse the same fixed-length preprocessing as validation/test.
+    audio_result = prepare_audio_tensor(
+        audio_path=audio_path,
+        sample_rate=sample_rate,
+        split="test",
+        fixed_duration_seconds=fixed_duration_seconds,
+        train_noise_max_amp=train_noise_max_amp,
+    )
+    audio = audio_result.audio.cpu().numpy()
     inputs = processor(
         [audio],
         sampling_rate=sample_rate,
         return_tensors="pt",
     )
     input_features = inputs.input_features.to(device)
-    # All frames are valid; WhisperProcessor already handles padding to
-    # the expected number of frames for the encoder.
     bsz, _, t_acoustic = input_features.shape
-    audio_attention_mask = torch.ones((bsz, t_acoustic), dtype=torch.long, device=device)
+    hop_length = int(getattr(feature_extractor, "hop_length", 160))
+    valid_frames = int(math.ceil(audio_result.audio.numel() / float(hop_length)))
+    valid_frames = max(0, min(t_acoustic, valid_frames))
+    audio_attention_mask = torch.zeros((bsz, t_acoustic), dtype=torch.long, device=device)
+    if valid_frames > 0:
+        audio_attention_mask[:, :valid_frames] = 1
 
     with torch.no_grad():
         outputs = model(

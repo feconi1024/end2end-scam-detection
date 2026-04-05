@@ -42,6 +42,7 @@ def create_training_arguments(
         "gradient_accumulation_steps": int(training_cfg.get("gradient_accumulation_steps", 1)),
         "num_train_epochs": float(training_cfg.get("num_train_epochs", 3.0)),
         "learning_rate": float(training_cfg.get("learning_rate", 1e-4)),
+        "weight_decay": float(training_cfg.get("weight_decay", 0.0)),
         "warmup_steps": int(training_cfg.get("warmup_steps", 0)),
         "logging_steps": int(training_cfg.get("logging_steps", 50)),
         "save_steps": int(training_cfg.get("save_steps", 1000)),

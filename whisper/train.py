@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
 from transformers import set_seed
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s: %(message)s",
+)
 
 _whisper_root = Path(__file__).resolve().parent
 if str(_whisper_root / "src") not in sys.path:

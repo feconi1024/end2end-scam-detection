@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import os
 import platform
 from pathlib import Path
 from typing import Dict, Any
+
+os.environ.setdefault("PYTORCH_NVML_BASED_CUDA_CHECK", "1")
 
 import torch
 from torch.utils.data import DataLoader
@@ -15,6 +18,7 @@ from e2e_cascading.src.dataset import (
     load_config,
     create_collate_fn,
 )
+from e2e_cascading.src.device_utils import resolve_runtime_device
 from e2e_cascading.src.model import DifferentiableCascadeModel
 from e2e_cascading.src.loss import JointCTCSLULoss
 from e2e_cascading.src.trainer import Trainer, TrainerConfig
@@ -203,10 +207,7 @@ def main() -> None:
     output_dir = Path(cfg["training"]["output_dir"])
 
     # Device: respect CUDA_VISIBLE_DEVICES on Linux/Slurm; fallback to CPU if no GPU.
-    device_cfg = str(cfg["training"].get("device", "cuda")).lower()
-    if device_cfg == "cuda" and not torch.cuda.is_available():
-        device_cfg = "cpu"
-        print("CUDA not available; using device='cpu'.")
+    device_cfg = resolve_runtime_device(str(cfg["training"].get("device", "cuda")))
 
     # Effective steps per epoch for LR scheduler
     accum_steps = int(cfg["training"].get("gradient_accumulation_steps", 1))

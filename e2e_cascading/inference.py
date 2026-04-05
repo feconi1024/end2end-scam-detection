@@ -3,13 +3,17 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 from pathlib import Path
 from typing import Dict, Any
+
+os.environ.setdefault("PYTORCH_NVML_BASED_CUDA_CHECK", "1")
 
 import torch
 from transformers import WhisperProcessor, BertTokenizer
 
 from e2e_cascading.src.dataset import CharCTCTokenizer, load_config, prepare_audio_tensor
+from e2e_cascading.src.device_utils import resolve_runtime_device
 from e2e_cascading.src.model import DifferentiableCascadeModel
 
 
@@ -68,9 +72,7 @@ def run_inference(
     model.eval()
 
     # Device: use GPU if requested and available (respects CUDA_VISIBLE_DEVICES on Slurm).
-    device_str = str(cfg["training"].get("device", "cuda")).lower()
-    if device_str == "cuda" and not torch.cuda.is_available():
-        device_str = "cpu"
+    device_str = resolve_runtime_device(str(cfg["training"].get("device", "cuda")))
     device = torch.device(device_str)
     model.to(device)
 

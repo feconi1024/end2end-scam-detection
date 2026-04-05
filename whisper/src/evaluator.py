@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import evaluate
@@ -8,6 +9,8 @@ import re
 import numpy as np
 from sklearn.metrics import f1_score
 from transformers import WhisperProcessor
+
+logger = logging.getLogger(__name__)
 
 
 def parse_multitask_output(
@@ -129,6 +132,14 @@ def build_compute_metrics_fn(
         pred_transcripts: List[str] = []
         true_transcripts: List[str] = []
 
+        # Log a few sample predictions for debugging
+        num_debug = min(5, len(pred_str))
+        for i in range(num_debug):
+            logger.info(
+                "EVAL SAMPLE %d | pred: %.200s | label: %.200s",
+                i, pred_str[i], label_str[i],
+            )
+
         for p, t in zip(pred_str, label_str):
             p_intent, p_text = parse_multitask_output(
                 p,
@@ -185,8 +196,17 @@ def build_compute_metrics_fn(
         else:
             wer = 0.0
 
+        logger.info(
+            "EVAL SUMMARY | n_samples=%d | n_valid_intents=%d | n_invalid_preds=%d | f1=%.4f | wer=%.4f",
+            len(pred_str),
+            len(true_intents),
+            sum(1 for p in pred_intents if p == "__invalid__"),
+            float(intent_f1),
+            wer,
+        )
+
         return {
-            "intent_f1_micro": float(intent_f1),
+            "intent_f1_macro": float(intent_f1),
             "wer": wer,
         }
 

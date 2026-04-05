@@ -113,9 +113,8 @@ def run_inference(
 
     with torch.no_grad():
         generated_ids = model.generate(
-            inputs=input_tensor,
+            input_features=input_tensor,
             max_new_tokens=max_new_tokens,
-            forced_decoder_ids=None,
         )
 
     decoded = processor.batch_decode(

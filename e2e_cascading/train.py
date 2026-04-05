@@ -39,6 +39,41 @@ def get_dataset_audio_cfg(cfg: Dict[str, Any]) -> Dict[str, float]:
     }
 
 
+def build_dataloader(
+    dataset,
+    *,
+    batch_size: int,
+    shuffle: bool,
+    collate_fn,
+    requested_workers: int,
+    use_cuda: bool,
+    cfg: Dict[str, Any],
+) -> DataLoader:
+    training_cfg = cfg.get("training", {})
+    system = platform.system()
+    if system == "Windows":
+        num_workers = 0
+    else:
+        num_workers = max(0, int(requested_workers))
+
+    loader_kwargs: Dict[str, Any] = {
+        "dataset": dataset,
+        "batch_size": batch_size,
+        "shuffle": shuffle,
+        "num_workers": num_workers,
+        "collate_fn": collate_fn,
+        "pin_memory": bool(use_cuda and training_cfg.get("pin_memory", True)),
+    }
+
+    if num_workers > 0:
+        # Avoid Linux fork-after-CUDA-init worker crashes/OOM on Slurm.
+        loader_kwargs["multiprocessing_context"] = "spawn"
+        loader_kwargs["prefetch_factor"] = int(training_cfg.get("prefetch_factor", 1))
+        loader_kwargs["persistent_workers"] = bool(training_cfg.get("persistent_workers", False))
+
+    return DataLoader(**loader_kwargs)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train/evaluate differentiable cascaded E2E scam detector.")
     parser.add_argument(
@@ -131,35 +166,6 @@ def main() -> None:
         sample_rate=sr,
     )
 
-    # DataLoaders: use 0 workers on Windows (spawn can't pickle closures;
-    # WhisperCollator is picklable, but Windows multiprocessing is still fragile).
-    # On Linux/Slurm use config value for faster loading.
-    _requested_workers = int(cfg["training"].get("num_workers", 4))
-    num_workers = 0 if platform.system() == "Windows" else _requested_workers
-    batch_size = int(cfg["training"]["batch_size"])
-
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        collate_fn=collate_fn,
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        collate_fn=collate_fn,
-    )
-    test_loader = DataLoader(
-        test_ds,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        collate_fn=collate_fn,
-    )
-
     # Model
     num_labels = int(cfg["model"]["num_labels"])
     ctc_vocab_size = ctc_tokenizer.vocab_size
@@ -208,6 +214,39 @@ def main() -> None:
 
     # Device: respect CUDA_VISIBLE_DEVICES on Linux/Slurm; fallback to CPU if no GPU.
     device_cfg = resolve_runtime_device(str(cfg["training"].get("device", "cuda")))
+    use_cuda = device_cfg.startswith("cuda")
+
+    # DataLoaders: on Linux/Slurm prefer spawn workers to avoid forking after
+    # CUDA/model initialization, which can trigger worker OOMs or instability.
+    _requested_workers = int(cfg["training"].get("num_workers", 1))
+    batch_size = int(cfg["training"]["batch_size"])
+    train_loader = build_dataloader(
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=collate_fn,
+        requested_workers=_requested_workers,
+        use_cuda=use_cuda,
+        cfg=cfg,
+    )
+    val_loader = build_dataloader(
+        val_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_fn,
+        requested_workers=_requested_workers,
+        use_cuda=use_cuda,
+        cfg=cfg,
+    )
+    test_loader = build_dataloader(
+        test_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_fn,
+        requested_workers=_requested_workers,
+        use_cuda=use_cuda,
+        cfg=cfg,
+    )
 
     # Effective steps per epoch for LR scheduler
     accum_steps = int(cfg["training"].get("gradient_accumulation_steps", 1))

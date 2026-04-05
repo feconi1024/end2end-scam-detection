@@ -3,11 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import os
 from pathlib import Path
 from typing import Dict, Any
-
-os.environ.setdefault("PYTORCH_NVML_BASED_CUDA_CHECK", "1")
 
 import torch
 from transformers import WhisperProcessor, BertTokenizer

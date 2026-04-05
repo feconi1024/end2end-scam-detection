@@ -46,18 +46,15 @@ class Trainer:
         self.cfg = cfg
 
         self.device = torch.device(cfg.device)
-        self.model.to(self.device)
-        self.loss_fn.to(self.device)
         self.mixed_precision = str(cfg.mixed_precision).lower()
+        self._device_initialized = False
 
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=cfg.learning_rate,
             weight_decay=cfg.weight_decay,
         )
-        self.grad_scaler = torch.cuda.amp.GradScaler(
-            enabled=self.device.type == "cuda" and self.mixed_precision == "fp16"
-        )
+        self.grad_scaler = None
 
         # LR scheduler: linear warmup + cosine decay
         total_steps = steps_per_epoch * cfg.num_epochs
@@ -69,6 +66,25 @@ class Trainer:
 
         # Phase 1: freeze audio encoder
         self._freeze_audio_encoder()
+
+    def _ensure_device_initialized(self) -> None:
+        if self._device_initialized:
+            return
+        try:
+            self.model.to(self.device)
+            self.loss_fn.to(self.device)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to initialize requested device '{self.device}'. "
+                "The training config asked for GPU execution, but CUDA could "
+                "not be initialized cleanly. This code now fails fast instead "
+                "of silently falling back to CPU. If CPU training is intended, "
+                "set training.device to 'cpu' explicitly."
+            ) from exc
+        if self.device.type == "cuda" and self.mixed_precision == "fp16":
+            self.grad_scaler = torch.amp.GradScaler("cuda")
+        print(f"Using runtime device: {self.device}")
+        self._device_initialized = True
 
     def _build_scheduler(self, warmup_steps: int, total_steps: int) -> LambdaLR:
         def lr_lambda(current_step: int) -> float:
@@ -174,12 +190,16 @@ class Trainer:
         return outputs, loss_dict
 
     def train_epoch(self, epoch: int, dataloader: DataLoader) -> None:
+        # Start DataLoader workers before touching CUDA so Linux can keep the
+        # fast default multiprocessing path without forking a CUDA-initialized process.
+        data_iter = iter(dataloader)
+        self._ensure_device_initialized()
         self.model.train()
         running_loss = 0.0
         accum = self.cfg.gradient_accumulation_steps
 
         progress = tqdm(
-            enumerate(dataloader, start=1),
+            enumerate(data_iter, start=1),
             total=len(dataloader),
             desc=f"Epoch {epoch + 1}",
             leave=False,
@@ -189,16 +209,16 @@ class Trainer:
             _, loss_dict = self._forward_batch(batch)
 
             loss = loss_dict["loss"] / accum
-            if self.grad_scaler.is_enabled():
+            if self.grad_scaler is not None and self.grad_scaler.is_enabled():
                 self.grad_scaler.scale(loss).backward()
             else:
                 loss.backward()
 
             if step % accum == 0 or step == len(dataloader):
-                if self.grad_scaler.is_enabled():
+                if self.grad_scaler is not None and self.grad_scaler.is_enabled():
                     self.grad_scaler.unscale_(self.optimizer)
                 nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.max_grad_norm)
-                if self.grad_scaler.is_enabled():
+                if self.grad_scaler is not None and self.grad_scaler.is_enabled():
                     self.grad_scaler.step(self.optimizer)
                     self.grad_scaler.update()
                 else:
@@ -215,6 +235,8 @@ class Trainer:
 
     @torch.no_grad()
     def evaluate(self, dataloader: DataLoader, split_name: str = "val") -> Dict[str, float]:
+        data_iter = iter(dataloader)
+        self._ensure_device_initialized()
         self.model.eval()
 
         all_labels = []
@@ -223,7 +245,7 @@ class Trainer:
         total_loss = 0.0
         num_batches = 0
 
-        for batch in dataloader:
+        for batch in data_iter:
             outputs, loss_dict = self._forward_batch(batch)
             total_loss += loss_dict["loss"].item()
             num_batches += 1

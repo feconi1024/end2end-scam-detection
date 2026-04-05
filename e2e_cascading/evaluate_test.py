@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 import argparse
-import os
 import platform
 import time
 from pathlib import Path
 from typing import Any, Dict, List
-
-os.environ.setdefault("PYTORCH_NVML_BASED_CUDA_CHECK", "1")
 
 import torch
 from torch.utils.data import DataLoader
@@ -66,9 +63,11 @@ def build_dataloader(
     }
 
     if num_workers > 0:
-        loader_kwargs["multiprocessing_context"] = "spawn"
-        loader_kwargs["prefetch_factor"] = int(training_cfg.get("prefetch_factor", 1))
-        loader_kwargs["persistent_workers"] = bool(training_cfg.get("persistent_workers", False))
+        loader_kwargs["prefetch_factor"] = int(training_cfg.get("prefetch_factor", 2))
+        loader_kwargs["persistent_workers"] = bool(training_cfg.get("persistent_workers", True))
+        multiprocessing_context = training_cfg.get("multiprocessing_context")
+        if multiprocessing_context:
+            loader_kwargs["multiprocessing_context"] = str(multiprocessing_context)
 
     return DataLoader(**loader_kwargs)
 

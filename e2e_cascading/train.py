@@ -122,9 +122,6 @@ def main() -> None:
     train_manifest = _resolve_manifest(cfg["dataset"].get("train_manifest", ""))
     val_manifest = _resolve_manifest(cfg["dataset"].get("val_manifest", ""))
     test_manifest = _resolve_manifest(cfg["dataset"].get("test_manifest", ""))
-    print(f"Train manifest: {train_manifest}")
-    print(f"Val manifest: {val_manifest}")
-    print(f"Test manifest: {test_manifest}")
     ctc_blank_id = int(cfg["model"]["ctc_blank_token_id"])
     ctc_min_char_freq = int(cfg["model"].get("ctc_min_char_freq", 1))
     ctc_tokenizer = CharCTCTokenizer.build_from_manifest(

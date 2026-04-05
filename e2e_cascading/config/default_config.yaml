@@ -1,13 +1,11 @@
 dataset:
-  # Default experiment: corrected labels + grouped hard-split manifests.
-  train_manifest: "TeleAntiFraud-28k/corrected_manifests/train_manifest.csv"
-  val_manifest: "TeleAntiFraud-28k/corrected_manifests/val_manifest.csv"
-  test_manifest: "TeleAntiFraud-28k/corrected_manifests/test_manifest.csv"
+  # CSV manifests with columns: path, label, [transcript]
+  train_manifest: "TeleAntiFraud-28k/train_manifest.csv"
+  val_manifest: "TeleAntiFraud-28k/val_manifest.csv"
+  test_manifest: "TeleAntiFraud-28k/test_manifest.csv"
 
   # Audio loading
   sample_rate: 16000
-  fixed_duration_seconds: 15.0
-  train_noise_max_amp: 0.005
 
   # Label names in the manifest
   scam_label: "scam"

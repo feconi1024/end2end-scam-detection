@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import os
 import platform
 import time
 from pathlib import Path
 from typing import Any, Dict, List
+
+os.environ.setdefault("PYTORCH_NVML_BASED_CUDA_CHECK", "1")
 
 import torch
 from torch.utils.data import DataLoader
@@ -17,6 +20,7 @@ from e2e_cascading.src.dataset import (
     load_config,
     create_collate_fn,
 )
+from e2e_cascading.src.device_utils import resolve_runtime_device
 from e2e_cascading.src.model import DifferentiableCascadeModel
 
 
@@ -147,9 +151,7 @@ def main() -> None:
     model.load_state_dict(state)
     model.eval()
 
-    device_str = str(cfg["training"].get("device", "cuda")).lower()
-    if device_str == "cuda" and not torch.cuda.is_available():
-        device_str = "cpu"
+    device_str = resolve_runtime_device(str(cfg["training"].get("device", "cuda")))
     device = torch.device(device_str)
     model.to(device)
 

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
+from torch.optim.lr_scheduler import LambdaLR
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+from tqdm.auto import tqdm
 
 from .loss import JointCTCSLULoss
 
@@ -23,6 +26,9 @@ class TrainerConfig:
     log_interval: int
     device: str
     output_dir: Path
+    gradient_accumulation_steps: int = 1
+    max_grad_norm: float = 1.0
+    warmup_ratio: float = 0.05
 
 
 class Trainer:
@@ -31,6 +37,7 @@ class Trainer:
         model: nn.Module,
         loss_fn: JointCTCSLULoss,
         cfg: TrainerConfig,
+        steps_per_epoch: int = 1,
     ) -> None:
         self.model = model
         self.loss_fn = loss_fn
@@ -38,6 +45,7 @@ class Trainer:
 
         self.device = torch.device(cfg.device)
         self.model.to(self.device)
+        self.loss_fn.to(self.device)
 
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
@@ -45,11 +53,27 @@ class Trainer:
             weight_decay=cfg.weight_decay,
         )
 
+        # LR scheduler: linear warmup + cosine decay
+        total_steps = steps_per_epoch * cfg.num_epochs
+        warmup_steps = int(total_steps * cfg.warmup_ratio)
+        self.scheduler = self._build_scheduler(warmup_steps, total_steps)
+
         self.output_dir = cfg.output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # Phase 1: freeze audio encoder
         self._freeze_audio_encoder()
+
+    def _build_scheduler(self, warmup_steps: int, total_steps: int) -> LambdaLR:
+        def lr_lambda(current_step: int) -> float:
+            if current_step < warmup_steps:
+                return float(current_step) / float(max(1, warmup_steps))
+            progress = float(current_step - warmup_steps) / float(
+                max(1, total_steps - warmup_steps)
+            )
+            return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+
+        return LambdaLR(self.optimizer, lr_lambda)
 
     def _freeze_audio_encoder(self) -> None:
         if not hasattr(self.model, "audio_encoder"):
@@ -89,8 +113,12 @@ class Trainer:
         """
         if epoch == self.cfg.freeze_epochs:
             self._unfreeze_top_audio_layers()
-            for group in self.optimizer.param_groups:
-                group["lr"] = group["lr"] * self.cfg.lr_after_unfreeze_factor
+            # Scale down the scheduler's base_lrs so cosine decay continues
+            # from the reduced LR (LambdaLR multiplies base_lr by lambda).
+            factor = self.cfg.lr_after_unfreeze_factor
+            self.scheduler.base_lrs = [
+                lr * factor for lr in self.scheduler.base_lrs
+            ]
 
     def _forward_batch(self, batch: Dict[str, Tensor]) -> Tuple[Dict[str, Tensor], Dict[str, Tensor]]:
         input_features = batch["input_features"].to(self.device)
@@ -108,7 +136,16 @@ class Trainer:
         projected_attention_mask = outputs["projected_attention_mask"]
 
         # CTC input lengths are derived from the downsampled attention mask
-        ctc_input_lengths = projected_attention_mask.long().sum(dim=1)
+        if projected_attention_mask is None:
+            # Fall back to full length if mask is unavailable
+            ctc_input_lengths = torch.full(
+                (ctc_logits.size(0),),
+                fill_value=ctc_logits.size(1),
+                dtype=torch.long,
+                device=ctc_logits.device,
+            )
+        else:
+            ctc_input_lengths = projected_attention_mask.long().sum(dim=1)
 
         loss_dict = self.loss_fn(
             classification_logits=classification_logits,
@@ -123,16 +160,31 @@ class Trainer:
     def train_epoch(self, epoch: int, dataloader: DataLoader) -> None:
         self.model.train()
         running_loss = 0.0
+        accum = self.cfg.gradient_accumulation_steps
 
-        for step, batch in enumerate(dataloader, start=1):
+        progress = tqdm(
+            enumerate(dataloader, start=1),
+            total=len(dataloader),
+            desc=f"Epoch {epoch + 1}",
+            leave=False,
+        )
+
+        for step, batch in progress:
             _, loss_dict = self._forward_batch(batch)
 
-            loss = loss_dict["loss"]
+            loss = loss_dict["loss"] / accum
             loss.backward()
-            self.optimizer.step()
-            self.optimizer.zero_grad(set_to_none=True)
 
-            running_loss += loss.item()
+            if step % accum == 0 or step == len(dataloader):
+                nn.utils.clip_grad_norm_(
+                    self.model.parameters(), self.cfg.max_grad_norm
+                )
+                self.optimizer.step()
+                self.scheduler.step()
+                self.optimizer.zero_grad(set_to_none=True)
+
+            running_loss += loss_dict["loss"].item()
+            progress.set_postfix(loss=loss_dict["loss"].item())
             if step % self.cfg.log_interval == 0:
                 avg_loss = running_loss / self.cfg.log_interval
                 print(f"Epoch {epoch} step {step}: loss={avg_loss:.4f}")
@@ -149,20 +201,11 @@ class Trainer:
         num_batches = 0
 
         for batch in dataloader:
-            _, loss_dict = self._forward_batch(batch)
+            outputs, loss_dict = self._forward_batch(batch)
             total_loss += loss_dict["loss"].item()
             num_batches += 1
 
-            logits = loss_dict  # type: ignore[assignment]
-            # We need fresh outputs to avoid missing logits in loss_dict
-            with torch.no_grad():
-                outputs = self.model(
-                    input_features=batch["input_features"].to(self.device),
-                    audio_attention_mask=batch["audio_attention_mask"].to(self.device),
-                )
-                classification_logits = outputs["classification_logits"]
-                preds = classification_logits.argmax(dim=-1).cpu()
-
+            preds = outputs["classification_logits"].argmax(dim=-1).cpu()
             labels = batch["labels"]
 
             all_labels.extend(labels.tolist())

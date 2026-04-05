@@ -4,8 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
-import librosa
+import math
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.data import Dataset
 import torchaudio
@@ -48,12 +49,14 @@ class TeleAntiFraudDataset(Dataset):
         manifest_path: Union[str, Path],
         tokenizer,
         sample_rate: int,
+        split: str = "train",
         label_mapping: Optional[Dict[str, int]] = None,
     ) -> None:
         import csv
 
         self.manifest_path = Path(manifest_path)
         self.sample_rate = int(sample_rate)
+        self.split = str(split).lower()
         self.tokenizer = tokenizer
 
         self.examples: List[TeleAntiFraudExample] = []
@@ -104,9 +107,9 @@ class TeleAntiFraudDataset(Dataset):
         ex = self.examples[idx]
 
         # Load audio as float32 mono at the target sample rate.
-        # Prefer torchaudio (ships its own codecs, robust for mp3), fall back
-        # to librosa if torchaudio fails for any reason. If both backends
-        # fail, replace with a short silence segment to avoid crashing
+        # Prefer torchaudio (ships its own codecs, robust for mp3). If it
+        # fails for any reason (including unsupported codecs or truncated
+        # streams), replace with a short silence segment to avoid crashing
         # training on a few problematic files.
         path_str = ex.audio_path.as_posix()
         try:
@@ -118,20 +121,40 @@ class TeleAntiFraudDataset(Dataset):
                     waveform, sr, self.sample_rate
                 )
             audio_tensor = waveform.squeeze(0).float()
+            # --- AUGMENTATION FIX: Destroy TTS artifacts during training ---
+            if self.split == "train":
+                noise_amp = 0.005 * torch.rand(1).item()
+                audio_tensor = audio_tensor + noise_amp * torch.randn_like(audio_tensor)
         except Exception as e_torch:
-            try:
-                # Fallback to librosa (may rely on system codecs for mp3).
-                audio, sr = librosa.load(path_str, sr=self.sample_rate, mono=True)
-                audio_tensor = torch.from_numpy(audio).float()
-            except Exception as e_librosa:
-                # As a last resort, substitute 1 second of silence so that
-                # a handful of unreadable files do not abort training.
-                print(
-                    "[TeleAntiFraudDataset] Warning: failed to load audio with both "
-                    f"torchaudio and librosa, substituting silence. path={path_str}, "
-                    f"torchaudio_error={repr(e_torch)}, librosa_error={repr(e_librosa)}"
-                )
-                audio_tensor = torch.zeros(self.sample_rate, dtype=torch.float32)
+            # Substitute 1 second of silence so that a handful of unreadable
+            # files do not abort training. We avoid a secondary librosa-based
+            # fallback here to keep dependencies simple and to prevent noisy
+            # codec warnings on some platforms.
+            print(
+                "[TeleAntiFraudDataset] Warning: failed to load audio with torchaudio, "
+                f"substituting silence. path={path_str}, error={repr(e_torch)}"
+            )
+            audio_tensor = torch.zeros(self.sample_rate, dtype=torch.float32)
+
+        # --- FIX: True Length Ablation ---
+        # Force every audio sample to exactly 15 seconds to remove length leakage.
+        target_length = self.sample_rate * 15
+        if audio_tensor.size(0) > target_length:
+            if self.split == "train":
+                max_start = audio_tensor.size(0) - target_length
+                start = int(torch.randint(0, max_start + 1, (1,)).item())
+            else:
+                start = 0
+            audio_tensor = audio_tensor[start : start + target_length]
+        else:
+            pad_amount = target_length - audio_tensor.size(0)
+            if pad_amount > 0:
+                audio_tensor = F.pad(audio_tensor, (0, pad_amount))
+
+        # --- AUGMENTATION FIX: Destroy TTS artifacts during training ---
+        if self.split == "train":
+            noise_amp = 0.005 * torch.rand(1).item()
+            audio_tensor = audio_tensor + noise_amp * torch.randn_like(audio_tensor)
 
         label_id = self.label2id[ex.label_str]
 
@@ -142,6 +165,8 @@ class TeleAntiFraudDataset(Dataset):
                 add_special_tokens=False,
                 return_attention_mask=False,
                 return_token_type_ids=False,
+                truncation=True,
+                max_length=448,
             )
             token_ids = torch.tensor(encoded["input_ids"], dtype=torch.long)
 
@@ -152,45 +177,50 @@ class TeleAntiFraudDataset(Dataset):
         }
 
 
-def create_collate_fn(
-    processor,
-    pad_token_id: int,
-    sample_rate: int,
-) -> Callable[[Sequence[Dict[str, Any]]], Dict[str, Tensor]]:
+class WhisperCollator:
     """
-    Collate function that:
-      - Pads variable-length waveforms and converts them to Whisper log-Mel features.
-      - Pads variable-length token sequences for CTC targets.
-
-    Returns a dict with:
-      - input_features: (B, T_acoustic, n_mels)
-      - audio_attention_mask: (B, T_acoustic)
-      - labels: (B,)
-      - ctc_targets: (B, T_text) or None
-      - ctc_target_lengths: (B,) or None
+    Picklable collator for batching waveforms into Whisper-compatible mel features
+    and CTC targets. Use this so DataLoader with num_workers > 0 works on both
+    Windows (spawn) and Linux/Slurm (fork or spawn).
     """
 
-    def collate(batch: Sequence[Dict[str, Any]]) -> Dict[str, Tensor]:
+    def __init__(self, processor, pad_token_id: int, sample_rate: int) -> None:
+        self.processor = processor
+        self.pad_token_id = pad_token_id
+        self.sample_rate = sample_rate
+        self.hop_length = int(
+            getattr(getattr(processor, "feature_extractor", None), "hop_length", 160)
+        )
+
+    def __call__(self, batch: Sequence[Dict[str, Any]]) -> Dict[str, Tensor]:
         # Waveforms (list of 1D tensors) -> list of 1D numpy arrays
         audios_torch: List[Tensor] = [b["audio"] for b in batch]
         audios = [a.cpu().numpy() for a in audios_torch]
         labels = torch.tensor([b["label"] for b in batch], dtype=torch.long)
+        audio_durations = torch.tensor(
+            [a.numel() / float(self.sample_rate) for a in audios_torch],
+            dtype=torch.float32,
+        )
 
         # Use the full WhisperProcessor so that input_features are padded/
         # truncated to the fixed length expected by the Whisper encoder
         # (e.g., 3000 frames for 30s of audio).
-        processed = processor(
+        processed = self.processor(
             audios,
-            sampling_rate=sample_rate,
+            sampling_rate=self.sample_rate,
             return_tensors="pt",
         )
         input_features: Tensor = processed.input_features  # (B, n_mels, T_acoustic)
-        # WhisperProcessor already handles padding/truncation; we treat all
-        # frames as valid here.
         bsz, _, t_acoustic = input_features.shape
-        audio_attention_mask: Tensor = torch.ones(
-            (bsz, t_acoustic), dtype=torch.long
-        )
+        # Build a correct attention mask so padding isn't treated as speech.
+        # Whisper uses hop_length=160 at 16kHz, i.e. 10ms per frame.
+        # valid_frames ≈ ceil(num_samples / hop_length), clipped to T_acoustic.
+        audio_attention_mask = torch.zeros((bsz, t_acoustic), dtype=torch.long)
+        for i, wav in enumerate(audios_torch):
+            valid_frames = int(math.ceil(wav.numel() / float(self.hop_length)))
+            valid_frames = max(0, min(t_acoustic, valid_frames))
+            if valid_frames > 0:
+                audio_attention_mask[i, :valid_frames] = 1
 
         # CTC targets from tokenized transcripts
         token_seqs: List[Tensor] = [
@@ -202,7 +232,7 @@ def create_collate_fn(
             if max_len > 0:
                 padded = torch.full(
                     (len(batch), max_len),
-                    fill_value=pad_token_id,
+                    fill_value=self.pad_token_id,
                     dtype=torch.long,
                 )
                 for i, t in enumerate(token_seqs):
@@ -222,7 +252,23 @@ def create_collate_fn(
             "labels": labels,
             "ctc_targets": ctc_targets,
             "ctc_target_lengths": ctc_target_lengths,
+            "audio_durations": audio_durations,
         }
 
-    return collate
+
+def create_collate_fn(
+    processor,
+    pad_token_id: int,
+    sample_rate: int,
+) -> Callable[[Sequence[Dict[str, Any]]], Dict[str, Tensor]]:
+    """
+    Returns a picklable collator (WhisperCollator) so that DataLoader with
+    num_workers > 0 works on Linux and Slurm. On Windows, num_workers is
+    typically set to 0 in the training script to avoid spawn/pickle issues.
+    """
+    return WhisperCollator(
+        processor=processor,
+        pad_token_id=pad_token_id,
+        sample_rate=sample_rate,
+    )
 

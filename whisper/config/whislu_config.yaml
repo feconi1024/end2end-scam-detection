@@ -1,0 +1,35 @@
+# Use medium for 96GB; large-v3 often OOMs even on H100-96 with full decoder FT.
+model_name: "openai/whisper-medium"
+
+sampling_rate: 16000
+
+special_tokens: []  # unused with JSON targets
+label2token: {}     # unused with JSON targets
+
+lora: {}            # no LoRA when using SML JSON targets
+
+# Train on BOTH Transcript and Intent to ground the model's semantic understanding
+train_intent_only: false
+
+training:
+  output_dir: "outputs/whislu"
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 8
+  max_eval_samples: 1000              # increased for a more stable evaluation
+  num_train_epochs: 3
+  learning_rate: 5.0e-5
+  warmup_steps: 500
+  logging_steps: 50
+  save_steps: 2000
+  eval_steps: 2000
+  evaluation_strategy: "steps"
+  save_total_limit: 2
+  predict_with_generate: true
+  fp16: false
+  bf16: true                          # use bf16 on H100 to cut memory (no GradScaler issues)
+  generation_max_length: 256          # allow full transcript + intent JSON in generation
+
+inference:
+  max_new_tokens: 128
+  intent_only_max_new_tokens: 8

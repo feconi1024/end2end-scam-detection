@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import platform
 from pathlib import Path
 from typing import Dict, Any
 
@@ -47,6 +48,14 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    config_path = Path(args.config).resolve()
+    # Resolve relative manifest paths from repo root (parent of e2e_cascading) so
+    # training works from any cwd (e.g. Slurm job directory).
+    config_dir = config_path.parent
+    repo_root = config_dir.parent.parent
+    def _resolve_manifest(p: str) -> str:
+        path = Path(p)
+        return str(repo_root / p) if not path.is_absolute() else p
 
     # Build label mapping consistent across dataset and classifier
     label_mapping = build_label_mapping(cfg)
@@ -60,26 +69,29 @@ def main() -> None:
 
     # Datasets
     sr = int(cfg["dataset"]["sample_rate"])
-    train_manifest = cfg["dataset"].get("train_manifest")
-    val_manifest = cfg["dataset"].get("val_manifest")
-    test_manifest = cfg["dataset"].get("test_manifest")
+    train_manifest = _resolve_manifest(cfg["dataset"].get("train_manifest", ""))
+    val_manifest = _resolve_manifest(cfg["dataset"].get("val_manifest", ""))
+    test_manifest = _resolve_manifest(cfg["dataset"].get("test_manifest", ""))
 
     train_ds = TeleAntiFraudDataset(
         manifest_path=train_manifest,
         tokenizer=tokenizer,
         sample_rate=sr,
+        split="train",
         label_mapping=label_mapping,
     )
     val_ds = TeleAntiFraudDataset(
         manifest_path=val_manifest,
         tokenizer=tokenizer,
         sample_rate=sr,
+        split="val",
         label_mapping=label_mapping,
     )
     test_ds = TeleAntiFraudDataset(
         manifest_path=test_manifest,
         tokenizer=tokenizer,
         sample_rate=sr,
+        split="test",
         label_mapping=label_mapping,
     )
 
@@ -91,9 +103,12 @@ def main() -> None:
         sample_rate=sr,
     )
 
-    # DataLoaders
+    # DataLoaders: use 0 workers on Windows (spawn can't pickle closures;
+    # WhisperCollator is picklable, but Windows multiprocessing is still fragile).
+    # On Linux/Slurm use config value for faster loading.
+    _requested_workers = int(cfg["training"].get("num_workers", 4))
+    num_workers = 0 if platform.system() == "Windows" else _requested_workers
     batch_size = int(cfg["training"]["batch_size"])
-    num_workers = int(cfg["training"].get("num_workers", 0))
 
     train_loader = DataLoader(
         train_ds,
@@ -143,14 +158,36 @@ def main() -> None:
         model.load_state_dict(state)
         print(f"Loaded checkpoint from {args.checkpoint}")
 
+    # Compute class weights from training set to handle imbalance
+    from collections import Counter
+    label_counts = Counter(ex.label_str for ex in train_ds.examples)
+    total_samples = sum(label_counts.values())
+    num_classes = len(label_mapping)
+    class_weights = torch.zeros(num_classes, dtype=torch.float32)
+    for lbl, idx in label_mapping.items():
+        count = label_counts.get(lbl, 1)
+        class_weights[idx] = total_samples / (num_classes * count)
+    print(f"Class weights: {class_weights.tolist()}")
+
     # Loss and trainer
     loss_fn = JointCTCSLULoss(
         ctc_blank_id=ctc_blank_id,
         ctc_weight=cfg["training"]["ctc_weight"],
         slu_weight=cfg["training"]["slu_weight"],
+        class_weights=class_weights,
     )
 
     output_dir = Path(cfg["training"]["output_dir"])
+
+    # Device: respect CUDA_VISIBLE_DEVICES on Linux/Slurm; fallback to CPU if no GPU.
+    device_cfg = str(cfg["training"].get("device", "cuda")).lower()
+    if device_cfg == "cuda" and not torch.cuda.is_available():
+        device_cfg = "cpu"
+        print("CUDA not available; using device='cpu'.")
+
+    # Effective steps per epoch for LR scheduler
+    accum_steps = int(cfg["training"].get("gradient_accumulation_steps", 1))
+    steps_per_epoch = len(train_loader)
 
     trainer_cfg = TrainerConfig(
         num_epochs=int(cfg["training"]["num_epochs"]),
@@ -160,14 +197,18 @@ def main() -> None:
         freeze_epochs=int(cfg["model"]["freeze_epochs"]),
         audio_unfreeze_num_layers=int(cfg["model"]["audio_unfreeze_num_layers"]),
         log_interval=int(cfg["training"]["log_interval"]),
-        device=str(cfg["training"]["device"]),
+        device=device_cfg,
         output_dir=output_dir,
+        gradient_accumulation_steps=accum_steps,
+        max_grad_norm=float(cfg["training"].get("max_grad_norm", 1.0)),
+        warmup_ratio=float(cfg["training"].get("warmup_ratio", 0.05)),
     )
 
     trainer = Trainer(
         model=model,
         loss_fn=loss_fn,
         cfg=trainer_cfg,
+        steps_per_epoch=steps_per_epoch,
     )
 
     if args.eval_only:

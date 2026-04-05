@@ -54,7 +54,11 @@ def run_inference(
     model.load_state_dict(state)
     model.eval()
 
-    device = torch.device(cfg["training"]["device"])
+    # Device: use GPU if requested and available (respects CUDA_VISIBLE_DEVICES on Slurm).
+    device_str = str(cfg["training"].get("device", "cuda")).lower()
+    if device_str == "cuda" and not torch.cuda.is_available():
+        device_str = "cpu"
+    device = torch.device(device_str)
     model.to(device)
 
     # Load and preprocess audio

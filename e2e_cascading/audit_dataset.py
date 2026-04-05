@@ -5,7 +5,7 @@ import csv
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Dict, Iterable, List, Set, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -25,15 +25,6 @@ def load_rows(path: Path) -> List[Dict[str, str]]:
 
 def label_counts(rows: Iterable[Dict[str, str]]) -> Counter:
     return Counter(row["label"] for row in rows)
-
-
-def normalized_transcript(text: str) -> str:
-    return "".join(text.split())
-
-
-def char_bigrams(text: str) -> Set[str]:
-    normalized = normalized_transcript(text)
-    return {normalized[i : i + 2] for i in range(max(0, len(normalized) - 1))}
 
 
 def path_family(path_str: str) -> str:
@@ -66,36 +57,6 @@ def transcript_overlap(a_rows: Iterable[Dict[str, str]], b_rows: Iterable[Dict[s
     overlap_unique = sum(1 for text in b_texts if text in a_texts)
     overlap_rows = sum(count for text, count in b_texts.items() if text in a_texts)
     return overlap_unique, overlap_rows
-
-
-def transcript_hash_overlap(a_rows: Iterable[Dict[str, str]], b_rows: Iterable[Dict[str, str]]) -> int:
-    a_hashes = {
-        (row.get("group_id") or row.get("transcript_hash") or "").strip()
-        for row in a_rows
-        if (row.get("group_id") or row.get("transcript_hash") or "").strip()
-    }
-    b_hashes = {
-        (row.get("group_id") or row.get("transcript_hash") or "").strip()
-        for row in b_rows
-        if (row.get("group_id") or row.get("transcript_hash") or "").strip()
-    }
-    return len(a_hashes & b_hashes)
-
-
-def unseen_bigram_examples(train_rows: List[Dict[str, str]], eval_rows: List[Dict[str, str]]) -> Tuple[int, int]:
-    train_bigrams: Set[str] = set()
-    for row in train_rows:
-        train_bigrams.update(char_bigrams((row.get("transcript") or "").strip()))
-    unseen = 0
-    total = 0
-    for row in eval_rows:
-        transcript = (row.get("transcript") or "").strip()
-        if not transcript:
-            continue
-        total += 1
-        if any(bg not in train_bigrams for bg in char_bigrams(transcript)):
-            unseen += 1
-    return unseen, total
 
 
 def print_family_breakdown(split_name: str, rows: List[Dict[str, str]]) -> None:
@@ -176,9 +137,6 @@ def main() -> None:
         ("test", test_rows),
     ]:
         print(f"[{split_name}] total={len(rows)} labels={dict(label_counts(rows))}")
-        split_modes = sorted({(row.get("split_mode") or "").strip() for row in rows if row.get("split_mode")})
-        if split_modes:
-            print(f"  split_modes={split_modes}")
         print_family_breakdown(split_name, rows)
 
     print("\n[overlap]")
@@ -191,25 +149,6 @@ def main() -> None:
         print(
             f"  exact transcript overlap {left_name}->{right_name}: "
             f"unique={overlap_unique} rows_in_{right_name}={overlap_rows}"
-        )
-        hash_overlap = transcript_hash_overlap(left_rows, right_rows)
-        print(
-            f"  transcript-group overlap {left_name}->{right_name}: "
-            f"groups={hash_overlap}"
-        )
-
-    print("\n[hardness]")
-    unseen_val, total_val = unseen_bigram_examples(train_rows, val_rows)
-    unseen_test, total_test = unseen_bigram_examples(train_rows + val_rows, test_rows)
-    if total_val > 0:
-        print(
-            f"  val examples with unseen char bigrams vs train: "
-            f"{unseen_val}/{total_val} ({unseen_val / total_val:.4f})"
-        )
-    if total_test > 0:
-        print(
-            f"  test examples with unseen char bigrams vs train+val: "
-            f"{unseen_test}/{total_test} ({unseen_test / total_test:.4f})"
         )
 
     print("\n[text baseline]")

@@ -9,7 +9,7 @@ from typing import Dict, Any
 import torch
 from transformers import WhisperProcessor, BertTokenizer
 
-from e2e_cascading.src.dataset import load_config, prepare_audio_tensor
+from e2e_cascading.src.dataset import CharCTCTokenizer, load_config, prepare_audio_tensor
 from e2e_cascading.src.model import DifferentiableCascadeModel
 
 
@@ -25,7 +25,7 @@ def run_inference(
     sample_rate = int(cfg["dataset"]["sample_rate"])
 
     processor = WhisperProcessor.from_pretrained(whisper_name)
-    tokenizer = BertTokenizer.from_pretrained(bert_name)
+    BertTokenizer.from_pretrained(bert_name)
     feature_extractor = getattr(processor, "feature_extractor", processor)
 
     # Label mapping must match training
@@ -35,8 +35,20 @@ def run_inference(
     id2label = {v: k for k, v in label_mapping.items()}
 
     num_labels = int(cfg["model"]["num_labels"])
-    ctc_vocab_size = tokenizer.vocab_size
     ctc_blank_id = int(cfg["model"]["ctc_blank_token_id"])
+    ctc_min_char_freq = int(cfg["model"].get("ctc_min_char_freq", 1))
+    config_dir = config_path.resolve().parent
+    repo_root = config_dir.parent.parent
+    train_manifest = cfg["dataset"]["train_manifest"]
+    train_manifest_path = Path(train_manifest)
+    if not train_manifest_path.is_absolute():
+        train_manifest_path = (repo_root / train_manifest_path).resolve()
+    ctc_tokenizer = CharCTCTokenizer.build_from_manifest(
+        train_manifest_path,
+        blank_token_id=ctc_blank_id,
+        min_char_freq=ctc_min_char_freq,
+    )
+    ctc_vocab_size = ctc_tokenizer.vocab_size
 
     projector_cfg_overrides = cfg["model"].get("projector", {})
 

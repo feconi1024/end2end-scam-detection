@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -29,6 +30,7 @@ class TrainerConfig:
     gradient_accumulation_steps: int = 1
     max_grad_norm: float = 1.0
     warmup_ratio: float = 0.05
+    mixed_precision: str = "bf16"
 
 
 class Trainer:
@@ -46,11 +48,15 @@ class Trainer:
         self.device = torch.device(cfg.device)
         self.model.to(self.device)
         self.loss_fn.to(self.device)
+        self.mixed_precision = str(cfg.mixed_precision).lower()
 
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=cfg.learning_rate,
             weight_decay=cfg.weight_decay,
+        )
+        self.grad_scaler = torch.cuda.amp.GradScaler(
+            enabled=self.device.type == "cuda" and self.mixed_precision == "fp16"
         )
 
         # LR scheduler: linear warmup + cosine decay
@@ -120,6 +126,15 @@ class Trainer:
                 lr * factor for lr in self.scheduler.base_lrs
             ]
 
+    def _autocast_context(self):
+        if self.device.type != "cuda":
+            return nullcontext()
+        if self.mixed_precision == "bf16":
+            return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        if self.mixed_precision == "fp16":
+            return torch.autocast(device_type="cuda", dtype=torch.float16)
+        return nullcontext()
+
     def _forward_batch(self, batch: Dict[str, Tensor]) -> Tuple[Dict[str, Tensor], Dict[str, Tensor]]:
         input_features = batch["input_features"].to(self.device)
         audio_attention_mask = batch["audio_attention_mask"].to(self.device)
@@ -127,13 +142,14 @@ class Trainer:
         ctc_targets = batch["ctc_targets"].to(self.device)
         ctc_target_lengths = batch["ctc_target_lengths"].to(self.device)
 
-        outputs = self.model(
-            input_features=input_features,
-            audio_attention_mask=audio_attention_mask,
-        )
-        classification_logits = outputs["classification_logits"]
-        ctc_logits = outputs["ctc_logits"]
-        projected_attention_mask = outputs["projected_attention_mask"]
+        with self._autocast_context():
+            outputs = self.model(
+                input_features=input_features,
+                audio_attention_mask=audio_attention_mask,
+            )
+            classification_logits = outputs["classification_logits"]
+            ctc_logits = outputs["ctc_logits"]
+            projected_attention_mask = outputs["projected_attention_mask"]
 
         # CTC input lengths are derived from the downsampled attention mask
         if projected_attention_mask is None:
@@ -148,8 +164,8 @@ class Trainer:
             ctc_input_lengths = projected_attention_mask.long().sum(dim=1)
 
         loss_dict = self.loss_fn(
-            classification_logits=classification_logits,
-            ctc_logits=ctc_logits,
+            classification_logits=classification_logits.float(),
+            ctc_logits=ctc_logits.float(),
             labels=labels,
             ctc_targets=ctc_targets,
             ctc_input_lengths=ctc_input_lengths,
@@ -173,13 +189,20 @@ class Trainer:
             _, loss_dict = self._forward_batch(batch)
 
             loss = loss_dict["loss"] / accum
-            loss.backward()
+            if self.grad_scaler.is_enabled():
+                self.grad_scaler.scale(loss).backward()
+            else:
+                loss.backward()
 
             if step % accum == 0 or step == len(dataloader):
-                nn.utils.clip_grad_norm_(
-                    self.model.parameters(), self.cfg.max_grad_norm
-                )
-                self.optimizer.step()
+                if self.grad_scaler.is_enabled():
+                    self.grad_scaler.unscale_(self.optimizer)
+                nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.max_grad_norm)
+                if self.grad_scaler.is_enabled():
+                    self.grad_scaler.step(self.optimizer)
+                    self.grad_scaler.update()
+                else:
+                    self.optimizer.step()
                 self.scheduler.step()
                 self.optimizer.zero_grad(set_to_none=True)
 

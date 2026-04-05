@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
@@ -37,6 +38,76 @@ class TeleAntiFraudExample:
 class AudioPreprocessResult:
     audio: Tensor
     original_num_samples: int
+
+
+class CharCTCTokenizer:
+    """
+    Lightweight character-level tokenizer for the CTC auxiliary loss.
+
+    This avoids a prohibitively large frame-level vocabulary from a full BERT
+    tokenizer, which can cause OOM during speech training.
+    """
+
+    def __init__(
+        self,
+        char2id: Dict[str, int],
+        blank_token_id: int = 0,
+        unk_token: str = "<unk>",
+    ) -> None:
+        self.char2id = dict(char2id)
+        self.blank_token_id = int(blank_token_id)
+        self.unk_token = str(unk_token)
+        self.unk_token_id = self.char2id[self.unk_token]
+        # Padding is only used inside batches; valid lengths control CTCLoss.
+        self.pad_token_id = self.blank_token_id
+        self.vocab_size = max(self.char2id.values()) + 1
+
+    @classmethod
+    def build_from_manifest(
+        cls,
+        manifest_path: Union[str, Path],
+        blank_token_id: int = 0,
+        min_char_freq: int = 1,
+        unk_token: str = "<unk>",
+    ) -> "CharCTCTokenizer":
+        manifest = Path(manifest_path)
+        counts: Dict[str, int] = {}
+        with manifest.open("r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                transcript = (row.get("transcript") or "").strip()
+                if not transcript:
+                    continue
+                for ch in transcript:
+                    counts[ch] = counts.get(ch, 0) + 1
+
+        chars = sorted(ch for ch, freq in counts.items() if freq >= int(min_char_freq))
+        next_id = int(blank_token_id) + 1
+        char2id: Dict[str, int] = {}
+        for ch in chars:
+            char2id[ch] = next_id
+            next_id += 1
+        char2id[str(unk_token)] = next_id
+        return cls(
+            char2id=char2id,
+            blank_token_id=blank_token_id,
+            unk_token=unk_token,
+        )
+
+    def __call__(
+        self,
+        text: str,
+        add_special_tokens: bool = False,
+        return_attention_mask: bool = False,
+        return_token_type_ids: bool = False,
+        truncation: bool = True,
+        max_length: Optional[int] = None,
+    ) -> Dict[str, List[int]]:
+        del add_special_tokens, return_attention_mask, return_token_type_ids
+        ids = [self.char2id.get(ch, self.unk_token_id) for ch in text]
+        if truncation and max_length is not None:
+            ids = ids[: int(max_length)]
+        return {"input_ids": ids}
 
 
 def load_audio_tensor(audio_path: Union[str, Path], sample_rate: int) -> Tensor:
@@ -129,8 +200,6 @@ class TeleAntiFraudDataset(Dataset):
         fixed_duration_seconds: float = 15.0,
         train_noise_max_amp: float = 0.005,
     ) -> None:
-        import csv
-
         self.manifest_path = Path(manifest_path)
         self.sample_rate = int(sample_rate)
         self.split = str(split).lower()

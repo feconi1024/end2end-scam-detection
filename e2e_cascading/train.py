@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader
 from transformers import WhisperProcessor, BertTokenizer
 
 from e2e_cascading.src.dataset import (
+    CharCTCTokenizer,
     TeleAntiFraudDataset,
     load_config,
     create_collate_fn,
@@ -68,12 +69,15 @@ def main() -> None:
     # Build label mapping consistent across dataset and classifier
     label_mapping = build_label_mapping(cfg)
 
-    # Feature processor and tokenizer
+    # Feature processor and tokenizers
     whisper_name = cfg["model"]["whisper_model_name"]
     bert_name = cfg["model"]["bert_model_name"]
 
     whisper_processor = WhisperProcessor.from_pretrained(whisper_name)
-    tokenizer = BertTokenizer.from_pretrained(bert_name)
+    # The BERT tokenizer is not used for CTC anymore; we keep the semantic
+    # classifier vocabulary and use a lightweight character tokenizer for the
+    # auxiliary speech loss to avoid frame-level OOM.
+    BertTokenizer.from_pretrained(bert_name)
 
     # Datasets
     sr = int(cfg["dataset"]["sample_rate"])
@@ -81,10 +85,18 @@ def main() -> None:
     train_manifest = _resolve_manifest(cfg["dataset"].get("train_manifest", ""))
     val_manifest = _resolve_manifest(cfg["dataset"].get("val_manifest", ""))
     test_manifest = _resolve_manifest(cfg["dataset"].get("test_manifest", ""))
+    ctc_blank_id = int(cfg["model"]["ctc_blank_token_id"])
+    ctc_min_char_freq = int(cfg["model"].get("ctc_min_char_freq", 1))
+    ctc_tokenizer = CharCTCTokenizer.build_from_manifest(
+        train_manifest,
+        blank_token_id=ctc_blank_id,
+        min_char_freq=ctc_min_char_freq,
+    )
+    print(f"CTC char vocab size: {ctc_tokenizer.vocab_size}")
 
     train_ds = TeleAntiFraudDataset(
         manifest_path=train_manifest,
-        tokenizer=tokenizer,
+        tokenizer=ctc_tokenizer,
         sample_rate=sr,
         split="train",
         label_mapping=label_mapping,
@@ -92,7 +104,7 @@ def main() -> None:
     )
     val_ds = TeleAntiFraudDataset(
         manifest_path=val_manifest,
-        tokenizer=tokenizer,
+        tokenizer=ctc_tokenizer,
         sample_rate=sr,
         split="val",
         label_mapping=label_mapping,
@@ -100,7 +112,7 @@ def main() -> None:
     )
     test_ds = TeleAntiFraudDataset(
         manifest_path=test_manifest,
-        tokenizer=tokenizer,
+        tokenizer=ctc_tokenizer,
         sample_rate=sr,
         split="test",
         label_mapping=label_mapping,
@@ -108,7 +120,7 @@ def main() -> None:
     )
 
     # Collate function
-    pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else cfg["model"]["ctc_blank_token_id"]
+    pad_token_id = ctc_tokenizer.pad_token_id
     collate_fn = create_collate_fn(
         processor=whisper_processor,
         pad_token_id=pad_token_id,
@@ -146,8 +158,7 @@ def main() -> None:
 
     # Model
     num_labels = int(cfg["model"]["num_labels"])
-    ctc_vocab_size = tokenizer.vocab_size
-    ctc_blank_id = int(cfg["model"]["ctc_blank_token_id"])
+    ctc_vocab_size = ctc_tokenizer.vocab_size
 
     # Build id2label / label2id for classifier
     id2label = {v: k for k, v in label_mapping.items()}
@@ -214,6 +225,7 @@ def main() -> None:
         gradient_accumulation_steps=accum_steps,
         max_grad_norm=float(cfg["training"].get("max_grad_norm", 1.0)),
         warmup_ratio=float(cfg["training"].get("warmup_ratio", 0.05)),
+        mixed_precision=str(cfg["training"].get("mixed_precision", "bf16")),
     )
 
     trainer = Trainer(

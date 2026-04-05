@@ -130,6 +130,9 @@ def main() -> None:
         min_char_freq=ctc_min_char_freq,
     )
     test_manifest = _resolve_manifest(cfg["dataset"].get("test_manifest", ""))
+    print(f"Tokenizer manifest: {train_manifest}")
+    print(f"Test manifest: {test_manifest}")
+    print(f"Checkpoint: {args.checkpoint}")
 
     test_ds = TeleAntiFraudDataset(
         manifest_path=test_manifest,

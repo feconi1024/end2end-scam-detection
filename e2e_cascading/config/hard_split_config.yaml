@@ -1,8 +1,8 @@
 dataset:
-  # Default experiment: corrected labels + grouped hard-split manifests.
-  train_manifest: "TeleAntiFraud-28k/corrected_manifests/train_manifest.csv"
-  val_manifest: "TeleAntiFraud-28k/corrected_manifests/val_manifest.csv"
-  test_manifest: "TeleAntiFraud-28k/corrected_manifests/test_manifest.csv"
+  # Hard split: corrected labels + grouped hard-test split with rare char bigrams.
+  train_manifest: "TeleAntiFraud-28k/hard_manifests/train_manifest.csv"
+  val_manifest: "TeleAntiFraud-28k/hard_manifests/val_manifest.csv"
+  test_manifest: "TeleAntiFraud-28k/hard_manifests/test_manifest.csv"
 
   # Audio loading
   sample_rate: 16000
@@ -33,8 +33,8 @@ model:
   ctc_min_char_freq: 1
 
   # Iterative freezing configuration
-  freeze_epochs: 1        # Phase 1: freeze audio encoder for first N epochs
-  audio_unfreeze_num_layers: 4  # Number of top encoder layers to unfreeze
+  freeze_epochs: 1
+  audio_unfreeze_num_layers: 4
 
 training:
   num_epochs: 10
@@ -42,25 +42,21 @@ training:
   learning_rate: 3.0e-5
   weight_decay: 0.01
   lr_after_unfreeze_factor: 0.5
-  gradient_accumulation_steps: 8   # effective batch size = 4 * 8 = 32
+  gradient_accumulation_steps: 8
 
   ctc_weight: 0.3
   slu_weight: 0.7
 
   # Training stability
   max_grad_norm: 1.0
-  warmup_ratio: 0.05     # 5% of total steps for linear warmup
+  warmup_ratio: 0.05
   mixed_precision: "bf16"
 
-  device: "cuda"   # "cuda" or "cpu"; respects CUDA_VISIBLE_DEVICES on Linux/Slurm
-  # Restore normal Linux DataLoader throughput now that CUDA init is deferred
-  # until after worker startup and no silent CPU fallback is used.
+  device: "cuda"
   num_workers: 4
   prefetch_factor: 2
   persistent_workers: true
   pin_memory: true
   log_interval: 10
 
-  # Checkpoint directory
-  output_dir: "e2e_cascading/checkpoints"
-
+  output_dir: "e2e_cascading/checkpoints_hard_split"

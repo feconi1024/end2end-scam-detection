@@ -47,9 +47,9 @@ training:
   mixed_precision: "bf16"
 
   device: "cuda"
-  num_workers: 4
-  prefetch_factor: 2
-  persistent_workers: true
+  num_workers: 1
+  prefetch_factor: 1
+  persistent_workers: false
   pin_memory: true
   log_interval: 10
 

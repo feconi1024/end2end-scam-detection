@@ -55,9 +55,9 @@ training:
   device: "cuda"   # "cuda" or "cpu"; respects CUDA_VISIBLE_DEVICES on Linux/Slurm
   # Restore normal Linux DataLoader throughput now that CUDA init is deferred
   # until after worker startup and no silent CPU fallback is used.
-  num_workers: 4
-  prefetch_factor: 2
-  persistent_workers: true
+  num_workers: 1
+  prefetch_factor: 1
+  persistent_workers: false
   pin_memory: true
   log_interval: 10
 

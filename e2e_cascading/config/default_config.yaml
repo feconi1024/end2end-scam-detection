@@ -1,8 +1,10 @@
 dataset:
   # CSV manifests with columns: path, label, [transcript]
-  train_manifest: "TeleAntiFraud-28k/train_manifest.csv"
-  val_manifest: "TeleAntiFraud-28k/val_manifest.csv"
-  test_manifest: "TeleAntiFraud-28k/test_manifest.csv"
+  # Standard corrected split: labels come from TeleAntiFraud family prefixes
+  # (NEG -> scam, POS -> non_scam), not from tts_fraud / tts_test filenames.
+  train_manifest: "TeleAntiFraud-28k/corrected_manifests/train_manifest.csv"
+  val_manifest: "TeleAntiFraud-28k/corrected_manifests/val_manifest.csv"
+  test_manifest: "TeleAntiFraud-28k/corrected_manifests/test_manifest.csv"
 
   # Audio loading
   sample_rate: 16000

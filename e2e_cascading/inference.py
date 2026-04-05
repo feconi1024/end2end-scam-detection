@@ -44,6 +44,7 @@ def run_inference(
     train_manifest_path = Path(train_manifest)
     if not train_manifest_path.is_absolute():
         train_manifest_path = (repo_root / train_manifest_path).resolve()
+    print(f"Tokenizer manifest: {train_manifest_path}")
     ctc_tokenizer = CharCTCTokenizer.build_from_manifest(
         train_manifest_path,
         blank_token_id=ctc_blank_id,

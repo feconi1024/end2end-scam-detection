@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import argparse
-import os
 import platform
 from pathlib import Path
 from typing import Dict, Any
-
-os.environ.setdefault("PYTORCH_NVML_BASED_CUDA_CHECK", "1")
 
 import torch
 from torch.utils.data import DataLoader
@@ -66,10 +63,11 @@ def build_dataloader(
     }
 
     if num_workers > 0:
-        # Avoid Linux fork-after-CUDA-init worker crashes/OOM on Slurm.
-        loader_kwargs["multiprocessing_context"] = "spawn"
-        loader_kwargs["prefetch_factor"] = int(training_cfg.get("prefetch_factor", 1))
-        loader_kwargs["persistent_workers"] = bool(training_cfg.get("persistent_workers", False))
+        loader_kwargs["prefetch_factor"] = int(training_cfg.get("prefetch_factor", 2))
+        loader_kwargs["persistent_workers"] = bool(training_cfg.get("persistent_workers", True))
+        multiprocessing_context = training_cfg.get("multiprocessing_context")
+        if multiprocessing_context:
+            loader_kwargs["multiprocessing_context"] = str(multiprocessing_context)
 
     return DataLoader(**loader_kwargs)
 
@@ -212,14 +210,18 @@ def main() -> None:
 
     output_dir = Path(cfg["training"]["output_dir"])
 
-    # Device: respect CUDA_VISIBLE_DEVICES on Linux/Slurm; fallback to CPU if no GPU.
+    # Device: keep the requested device and let actual initialization fail fast
+    # if CUDA is unavailable, instead of silently falling back to CPU.
     device_cfg = resolve_runtime_device(str(cfg["training"].get("device", "cuda")))
     use_cuda = device_cfg.startswith("cuda")
 
-    # DataLoaders: on Linux/Slurm prefer spawn workers to avoid forking after
-    # CUDA/model initialization, which can trigger worker OOMs or instability.
-    _requested_workers = int(cfg["training"].get("num_workers", 1))
+    _requested_workers = int(cfg["training"].get("num_workers", 4))
     batch_size = int(cfg["training"]["batch_size"])
+    print(
+        f"Building DataLoaders with num_workers={_requested_workers}, "
+        f"persistent_workers={bool(cfg['training'].get('persistent_workers', True))}, "
+        f"prefetch_factor={int(cfg['training'].get('prefetch_factor', 2))}"
+    )
     train_loader = build_dataloader(
         train_ds,
         batch_size=batch_size,

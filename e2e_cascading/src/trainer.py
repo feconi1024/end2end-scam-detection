@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 from torch import Tensor, nn
@@ -237,17 +237,37 @@ class Trainer:
         self,
         train_loader: DataLoader,
         val_loader: Optional[DataLoader] = None,
-    ) -> None:
+    ) -> Dict[str, Any]:
+        best_metric = float("-inf")
+        best_ckpt_path: Optional[Path] = None
+        final_ckpt_path: Optional[Path] = None
+
         for epoch in range(self.cfg.num_epochs):
             self._maybe_switch_phase(epoch)
             print(f"=== Epoch {epoch + 1}/{self.cfg.num_epochs} ===")
             self.train_epoch(epoch, train_loader)
 
             if val_loader is not None:
-                self.evaluate(val_loader, split_name="val")
+                val_metrics = self.evaluate(val_loader, split_name="val")
+                val_f1 = float(val_metrics.get("val_f1", float("-inf")))
+                if val_f1 > best_metric:
+                    best_metric = val_f1
+                    best_ckpt_path = self.output_dir / "best_model.pt"
+                    torch.save(self.model.state_dict(), best_ckpt_path)
+                    print(
+                        f"Saved new best checkpoint to {best_ckpt_path} "
+                        f"(val_f1={val_f1:.4f})"
+                    )
 
             # Save checkpoint after each epoch
             ckpt_path = self.output_dir / f"model_epoch_{epoch+1}.pt"
             torch.save(self.model.state_dict(), ckpt_path)
             print(f"Saved checkpoint to {ckpt_path}")
+            final_ckpt_path = ckpt_path
+
+        return {
+            "best_checkpoint": best_ckpt_path,
+            "best_val_f1": None if best_ckpt_path is None else best_metric,
+            "final_checkpoint": final_ckpt_path,
+        }
 

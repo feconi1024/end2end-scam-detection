@@ -26,6 +26,14 @@ def build_label_mapping(cfg: Dict[str, Any]) -> Dict[str, int]:
     return {non_scam_label: 0, scam_label: 1}
 
 
+def get_dataset_audio_cfg(cfg: Dict[str, Any]) -> Dict[str, float]:
+    dataset_cfg = cfg.get("dataset", {})
+    return {
+        "fixed_duration_seconds": float(dataset_cfg.get("fixed_duration_seconds", 15.0)),
+        "train_noise_max_amp": float(dataset_cfg.get("train_noise_max_amp", 0.005)),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train/evaluate differentiable cascaded E2E scam detector.")
     parser.add_argument(
@@ -69,6 +77,7 @@ def main() -> None:
 
     # Datasets
     sr = int(cfg["dataset"]["sample_rate"])
+    audio_cfg = get_dataset_audio_cfg(cfg)
     train_manifest = _resolve_manifest(cfg["dataset"].get("train_manifest", ""))
     val_manifest = _resolve_manifest(cfg["dataset"].get("val_manifest", ""))
     test_manifest = _resolve_manifest(cfg["dataset"].get("test_manifest", ""))
@@ -79,6 +88,7 @@ def main() -> None:
         sample_rate=sr,
         split="train",
         label_mapping=label_mapping,
+        **audio_cfg,
     )
     val_ds = TeleAntiFraudDataset(
         manifest_path=val_manifest,
@@ -86,6 +96,7 @@ def main() -> None:
         sample_rate=sr,
         split="val",
         label_mapping=label_mapping,
+        **audio_cfg,
     )
     test_ds = TeleAntiFraudDataset(
         manifest_path=test_manifest,
@@ -93,6 +104,7 @@ def main() -> None:
         sample_rate=sr,
         split="test",
         label_mapping=label_mapping,
+        **audio_cfg,
     )
 
     # Collate function
@@ -220,8 +232,18 @@ def main() -> None:
         return
 
     # Train then evaluate on test set
-    trainer.fit(train_loader, val_loader=val_loader)
-    print("Training complete. Evaluating on test set with final checkpoint...")
+    fit_result = trainer.fit(train_loader, val_loader=val_loader)
+
+    best_ckpt = fit_result.get("best_checkpoint")
+    if best_ckpt is not None:
+        state = torch.load(best_ckpt, map_location="cpu")
+        model.load_state_dict(state)
+        print(
+            "Training complete. Evaluating on test set with best validation checkpoint "
+            f"({best_ckpt})..."
+        )
+    else:
+        print("Training complete. Evaluating on test set with final checkpoint...")
     trainer.evaluate(test_loader, split_name="test")
 
 

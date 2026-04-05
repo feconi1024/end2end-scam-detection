@@ -12,6 +12,7 @@ from transformers import WhisperProcessor, BertTokenizer
 from sklearn.metrics import f1_score
 
 from e2e_cascading.src.dataset import (
+    CharCTCTokenizer,
     TeleAntiFraudDataset,
     load_config,
     create_collate_fn,
@@ -79,22 +80,30 @@ def main() -> None:
     bert_name = cfg["model"]["bert_model_name"]
 
     processor = WhisperProcessor.from_pretrained(whisper_name)
-    tokenizer = BertTokenizer.from_pretrained(bert_name)
+    BertTokenizer.from_pretrained(bert_name)
 
     sr = int(cfg["dataset"]["sample_rate"])
     audio_cfg = get_dataset_audio_cfg(cfg)
+    ctc_blank_id = int(cfg["model"]["ctc_blank_token_id"])
+    ctc_min_char_freq = int(cfg["model"].get("ctc_min_char_freq", 1))
+    train_manifest = _resolve_manifest(cfg["dataset"].get("train_manifest", ""))
+    ctc_tokenizer = CharCTCTokenizer.build_from_manifest(
+        train_manifest,
+        blank_token_id=ctc_blank_id,
+        min_char_freq=ctc_min_char_freq,
+    )
     test_manifest = _resolve_manifest(cfg["dataset"].get("test_manifest", ""))
 
     test_ds = TeleAntiFraudDataset(
         manifest_path=test_manifest,
-        tokenizer=tokenizer,
+        tokenizer=ctc_tokenizer,
         sample_rate=sr,
         split="test",
         label_mapping=label_mapping,
         **audio_cfg,
     )
 
-    pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else cfg["model"]["ctc_blank_token_id"]
+    pad_token_id = ctc_tokenizer.pad_token_id
     collate_fn = create_collate_fn(
         processor=processor,
         pad_token_id=pad_token_id,
@@ -118,8 +127,7 @@ def main() -> None:
     )
 
     num_labels = int(cfg["model"]["num_labels"])
-    ctc_vocab_size = tokenizer.vocab_size
-    ctc_blank_id = int(cfg["model"]["ctc_blank_token_id"])
+    ctc_vocab_size = ctc_tokenizer.vocab_size
 
     id2label = {v: k for k, v in label_mapping.items()}
     projector_cfg_overrides = cfg["model"].get("projector", {})

@@ -4,6 +4,7 @@ from typing import Any, Dict, Optional
 
 import torch
 from torch import Tensor, nn
+import torch.nn.functional as F
 from transformers import (
     BertForSequenceClassification,
     BertConfig,
@@ -63,6 +64,11 @@ class DifferentiableCascadeModel(nn.Module):
                     setattr(base_proj_cfg, k, v)
         self.projector = ModalityProjector(base_proj_cfg)
 
+        # Learnable [CLS] embedding for BERT-style pooling on token 0.
+        # Without this, BERT would pool from the first acoustic frame.
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, semantic_dim))
+        nn.init.normal_(self.cls_token, mean=0.0, std=0.02)
+
         # CTC head maps projector output to tokenizer vocabulary
         self.ctc_head = nn.Linear(semantic_dim, ctc_vocab_size)
         self.ctc_blank_id = int(ctc_blank_id)
@@ -89,18 +95,57 @@ class DifferentiableCascadeModel(nn.Module):
             input_features=input_features,
             attention_mask=audio_attention_mask,
         )
-        hidden_states: Tensor = enc_outputs.last_hidden_state  # (B, T_acoustic, d_model)
+        hidden_states: Tensor = enc_outputs.last_hidden_state  # (B, T_enc, d_model)
+
+        # Whisper encoder can change the time resolution (e.g., T_enc != T_mel).
+        # Ensure the mask we pass into the projector matches hidden_states length.
+        encoder_attention_mask: Optional[Tensor]
+        if audio_attention_mask is None:
+            encoder_attention_mask = None
+        else:
+            mask = audio_attention_mask
+            if mask.dim() != 2:
+                raise ValueError(f"audio_attention_mask must be (B, T), got {tuple(mask.shape)}")
+            t_mel = mask.size(1)
+            t_enc = hidden_states.size(1)
+            if t_mel == t_enc:
+                encoder_attention_mask = mask
+            else:
+                # Downsample by max-pooling in time, then crop/pad to t_enc.
+                # Commonly, Whisper reduces length by ~2.
+                ratio = max(1, int(round(t_mel / float(t_enc))))
+                pooled = F.max_pool1d(
+                    mask.unsqueeze(1).float(),
+                    kernel_size=ratio,
+                    stride=ratio,
+                    ceil_mode=True,
+                ).squeeze(1).long()
+                if pooled.size(1) < t_enc:
+                    pad = t_enc - pooled.size(1)
+                    pooled = F.pad(pooled, (0, pad), value=0)
+                encoder_attention_mask = pooled[:, :t_enc]
 
         # Project to semantic space and downsample in time
         soft_embeddings, projected_attention_mask = self.projector(
-            hidden_states, attention_mask=audio_attention_mask
+            hidden_states, attention_mask=encoder_attention_mask
         )  # (B, T_semantic, semantic_dim), (B, T_semantic)
 
-        # Semantic decoder using inputs_embeds to preserve differentiability.
-        # We do not pass an attention_mask here to avoid shape mismatches
-        # between Whisper time steps and the projected sequence length.
+        # Prepend a learnable [CLS] token so BERT pools from index 0.
+        bsz = soft_embeddings.size(0)
+        cls = self.cls_token.expand(bsz, -1, -1)  # (B, 1, semantic_dim)
+        soft_embeddings_for_bert = torch.cat([cls, soft_embeddings], dim=1)
+
+        if projected_attention_mask is None:
+            bert_attention_mask = None
+        else:
+            cls_mask = projected_attention_mask.new_ones((bsz, 1))
+            bert_attention_mask = torch.cat([cls_mask, projected_attention_mask], dim=1)
+
+        # Now that waveforms are forced to a fixed length in dataset preprocessing,
+        # we can safely pass attention masks back to the semantic decoder.
         decoder_outputs = self.semantic_decoder(
-            inputs_embeds=soft_embeddings,
+            inputs_embeds=soft_embeddings_for_bert,
+            attention_mask=bert_attention_mask,
             return_dict=True,
         )
         classification_logits: Tensor = decoder_outputs.logits  # (B, num_labels)
@@ -111,6 +156,9 @@ class DifferentiableCascadeModel(nn.Module):
         return {
             "classification_logits": classification_logits,
             "ctc_logits": ctc_logits,
+            # For CTC / length accounting (no CLS)
             "projected_attention_mask": projected_attention_mask,
+            # For BERT (with CLS prepended)
+            "bert_attention_mask": bert_attention_mask,
         }
 

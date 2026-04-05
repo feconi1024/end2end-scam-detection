@@ -16,6 +16,7 @@ class JointCTCSLULoss(nn.Module):
         ctc_blank_id: int,
         ctc_weight: float = 0.3,
         slu_weight: float = 0.7,
+        class_weights: Optional[Tensor] = None,
     ) -> None:
         super().__init__()
         self.ctc_weight = float(ctc_weight)
@@ -25,7 +26,9 @@ class JointCTCSLULoss(nn.Module):
             blank=ctc_blank_id,
             zero_infinity=True,
         )
-        self.ce_loss_fn = nn.CrossEntropyLoss()
+        self.ce_loss_fn = nn.CrossEntropyLoss(
+            weight=class_weights,
+        )
 
     def forward(
         self,
@@ -54,9 +57,11 @@ class JointCTCSLULoss(nn.Module):
             # Prepare shapes for nn.CTCLoss: (T, N, C)
             log_probs = ctc_logits.log_softmax(dim=-1).transpose(0, 1)  # (T, B, vocab)
 
-            # Flatten padded targets to 1D
-            # Only the first target_lengths[i] of each row will be used.
-            targets_flat = ctc_targets.contiguous().view(-1)
+            # Concatenate only the valid (non-padding) tokens from each row.
+            # nn.CTCLoss expects len(targets_flat) == sum(ctc_target_lengths).
+            targets_flat = torch.cat(
+                [ctc_targets[i, :ctc_target_lengths[i]] for i in range(ctc_targets.size(0))]
+            )
 
             ctc_loss = self.ctc_loss_fn(
                 log_probs,
@@ -64,10 +69,12 @@ class JointCTCSLULoss(nn.Module):
                 ctc_input_lengths,
                 ctc_target_lengths,
             )
+            total_loss = self.ctc_weight * ctc_loss + self.slu_weight * slu_loss
         else:
             ctc_loss = classification_logits.new_tensor(0.0)
-
-        total_loss = self.ctc_weight * ctc_loss + self.slu_weight * slu_loss
+            # No CTC targets: use unweighted classification loss so that the
+            # effective learning rate is not silently reduced by slu_weight.
+            total_loss = slu_loss
 
         return {
             "loss": total_loss,

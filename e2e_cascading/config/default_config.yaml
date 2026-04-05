@@ -51,8 +51,11 @@ training:
   mixed_precision: "bf16"
 
   device: "cuda"   # "cuda" or "cpu"; respects CUDA_VISIBLE_DEVICES on Linux/Slurm
-  # num_workers: on Linux/Slurm this value is used; on Windows it is overridden to 0.
-  num_workers: 4
+  # Use conservative worker settings on Linux/Slurm to avoid worker OOMs after CUDA init.
+  num_workers: 1
+  prefetch_factor: 1
+  persistent_workers: false
+  pin_memory: true
   log_interval: 10
 
   # Checkpoint directory

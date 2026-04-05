@@ -33,6 +33,81 @@ class TeleAntiFraudExample:
     transcript: Optional[str]
 
 
+@dataclass
+class AudioPreprocessResult:
+    audio: Tensor
+    original_num_samples: int
+
+
+def load_audio_tensor(audio_path: Union[str, Path], sample_rate: int) -> Tensor:
+    """
+    Load audio as mono float32 at the target sample rate.
+    """
+    path = Path(audio_path)
+    waveform, sr = torchaudio.load(path.as_posix())  # (channels, time)
+    if waveform.dim() == 2 and waveform.size(0) > 1:
+        waveform = waveform.mean(dim=0, keepdim=True)
+    if sr != sample_rate:
+        waveform = torchaudio.functional.resample(
+            waveform,
+            sr,
+            sample_rate,
+        )
+    return waveform.squeeze(0).float()
+
+
+def prepare_audio_tensor(
+    audio_path: Union[str, Path],
+    sample_rate: int,
+    split: str = "train",
+    fixed_duration_seconds: float = 15.0,
+    train_noise_max_amp: float = 0.005,
+) -> AudioPreprocessResult:
+    """
+    Load audio and apply the same preprocessing used by dataset training/eval.
+
+    Every example is normalized to the same fixed duration so downstream models
+    do not receive raw duration as an easy shortcut feature.
+    """
+    path = Path(audio_path)
+    split = str(split).lower()
+    target_length = int(sample_rate * fixed_duration_seconds)
+
+    try:
+        audio_tensor = load_audio_tensor(path, sample_rate=sample_rate)
+    except Exception as e_torch:
+        # Substitute 1 second of silence so that a handful of unreadable
+        # files do not abort training or evaluation.
+        print(
+            "[TeleAntiFraudDataset] Warning: failed to load audio with torchaudio, "
+            f"substituting silence. path={path.as_posix()}, error={repr(e_torch)}"
+        )
+        audio_tensor = torch.zeros(sample_rate, dtype=torch.float32)
+
+    original_num_samples = int(audio_tensor.numel())
+
+    if audio_tensor.size(0) > target_length:
+        if split == "train":
+            max_start = audio_tensor.size(0) - target_length
+            start = int(torch.randint(0, max_start + 1, (1,)).item())
+        else:
+            start = 0
+        audio_tensor = audio_tensor[start : start + target_length]
+    else:
+        pad_amount = target_length - audio_tensor.size(0)
+        if pad_amount > 0:
+            audio_tensor = F.pad(audio_tensor, (0, pad_amount))
+
+    if split == "train" and train_noise_max_amp > 0.0:
+        noise_amp = float(train_noise_max_amp) * torch.rand(1).item()
+        audio_tensor = audio_tensor + noise_amp * torch.randn_like(audio_tensor)
+
+    return AudioPreprocessResult(
+        audio=audio_tensor,
+        original_num_samples=original_num_samples,
+    )
+
+
 class TeleAntiFraudDataset(Dataset):
     """
     Dataset for TeleAntiFraud-28k-style manifests.
@@ -51,6 +126,8 @@ class TeleAntiFraudDataset(Dataset):
         sample_rate: int,
         split: str = "train",
         label_mapping: Optional[Dict[str, int]] = None,
+        fixed_duration_seconds: float = 15.0,
+        train_noise_max_amp: float = 0.005,
     ) -> None:
         import csv
 
@@ -58,6 +135,8 @@ class TeleAntiFraudDataset(Dataset):
         self.sample_rate = int(sample_rate)
         self.split = str(split).lower()
         self.tokenizer = tokenizer
+        self.fixed_duration_seconds = float(fixed_duration_seconds)
+        self.train_noise_max_amp = float(train_noise_max_amp)
 
         self.examples: List[TeleAntiFraudExample] = []
         with self.manifest_path.open("r", encoding="utf-8") as f:
@@ -105,56 +184,14 @@ class TeleAntiFraudDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         ex = self.examples[idx]
-
-        # Load audio as float32 mono at the target sample rate.
-        # Prefer torchaudio (ships its own codecs, robust for mp3). If it
-        # fails for any reason (including unsupported codecs or truncated
-        # streams), replace with a short silence segment to avoid crashing
-        # training on a few problematic files.
-        path_str = ex.audio_path.as_posix()
-        try:
-            waveform, sr = torchaudio.load(path_str)  # (channels, time)
-            if waveform.dim() == 2 and waveform.size(0) > 1:
-                waveform = waveform.mean(dim=0, keepdim=True)
-            if sr != self.sample_rate:
-                waveform = torchaudio.functional.resample(
-                    waveform, sr, self.sample_rate
-                )
-            audio_tensor = waveform.squeeze(0).float()
-            # --- AUGMENTATION FIX: Destroy TTS artifacts during training ---
-            if self.split == "train":
-                noise_amp = 0.005 * torch.rand(1).item()
-                audio_tensor = audio_tensor + noise_amp * torch.randn_like(audio_tensor)
-        except Exception as e_torch:
-            # Substitute 1 second of silence so that a handful of unreadable
-            # files do not abort training. We avoid a secondary librosa-based
-            # fallback here to keep dependencies simple and to prevent noisy
-            # codec warnings on some platforms.
-            print(
-                "[TeleAntiFraudDataset] Warning: failed to load audio with torchaudio, "
-                f"substituting silence. path={path_str}, error={repr(e_torch)}"
-            )
-            audio_tensor = torch.zeros(self.sample_rate, dtype=torch.float32)
-
-        # --- FIX: True Length Ablation ---
-        # Force every audio sample to exactly 15 seconds to remove length leakage.
-        target_length = self.sample_rate * 15
-        if audio_tensor.size(0) > target_length:
-            if self.split == "train":
-                max_start = audio_tensor.size(0) - target_length
-                start = int(torch.randint(0, max_start + 1, (1,)).item())
-            else:
-                start = 0
-            audio_tensor = audio_tensor[start : start + target_length]
-        else:
-            pad_amount = target_length - audio_tensor.size(0)
-            if pad_amount > 0:
-                audio_tensor = F.pad(audio_tensor, (0, pad_amount))
-
-        # --- AUGMENTATION FIX: Destroy TTS artifacts during training ---
-        if self.split == "train":
-            noise_amp = 0.005 * torch.rand(1).item()
-            audio_tensor = audio_tensor + noise_amp * torch.randn_like(audio_tensor)
+        audio_result = prepare_audio_tensor(
+            audio_path=ex.audio_path,
+            sample_rate=self.sample_rate,
+            split=self.split,
+            fixed_duration_seconds=self.fixed_duration_seconds,
+            train_noise_max_amp=self.train_noise_max_amp,
+        )
+        audio_tensor = audio_result.audio
 
         label_id = self.label2id[ex.label_str]
 
@@ -174,6 +211,7 @@ class TeleAntiFraudDataset(Dataset):
             "audio": audio_tensor,  # 1D waveform
             "label": label_id,
             "transcript_ids": token_ids,  # 1D token sequence or None
+            "original_num_samples": audio_result.original_num_samples,
         }
 
 
@@ -198,7 +236,10 @@ class WhisperCollator:
         audios = [a.cpu().numpy() for a in audios_torch]
         labels = torch.tensor([b["label"] for b in batch], dtype=torch.long)
         audio_durations = torch.tensor(
-            [a.numel() / float(self.sample_rate) for a in audios_torch],
+            [
+                float(b.get("original_num_samples", a.numel())) / float(self.sample_rate)
+                for a, b in zip(audios_torch, batch)
+            ],
             dtype=torch.float32,
         )
 

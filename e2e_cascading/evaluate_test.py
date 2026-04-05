@@ -26,6 +26,14 @@ def build_label_mapping(cfg: Dict[str, Any]) -> Dict[str, int]:
     return {non_scam_label: 0, scam_label: 1}
 
 
+def get_dataset_audio_cfg(cfg: Dict[str, Any]) -> Dict[str, float]:
+    dataset_cfg = cfg.get("dataset", {})
+    return {
+        "fixed_duration_seconds": float(dataset_cfg.get("fixed_duration_seconds", 15.0)),
+        "train_noise_max_amp": float(dataset_cfg.get("train_noise_max_amp", 0.005)),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Evaluate a checkpoint on the test set and report F1 + latency per minute of audio."
@@ -74,6 +82,7 @@ def main() -> None:
     tokenizer = BertTokenizer.from_pretrained(bert_name)
 
     sr = int(cfg["dataset"]["sample_rate"])
+    audio_cfg = get_dataset_audio_cfg(cfg)
     test_manifest = _resolve_manifest(cfg["dataset"].get("test_manifest", ""))
 
     test_ds = TeleAntiFraudDataset(
@@ -82,6 +91,7 @@ def main() -> None:
         sample_rate=sr,
         split="test",
         label_mapping=label_mapping,
+        **audio_cfg,
     )
 
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else cfg["model"]["ctc_blank_token_id"]

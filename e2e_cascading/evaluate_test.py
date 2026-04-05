@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import os
 import platform
 import time
 from pathlib import Path
 from typing import Any, Dict, List
+
+os.environ.setdefault("PYTORCH_NVML_BASED_CUDA_CHECK", "1")
 
 import torch
 from torch.utils.data import DataLoader
@@ -17,6 +20,7 @@ from e2e_cascading.src.dataset import (
     load_config,
     create_collate_fn,
 )
+from e2e_cascading.src.device_utils import resolve_runtime_device
 from e2e_cascading.src.model import DifferentiableCascadeModel
 
 
@@ -33,6 +37,40 @@ def get_dataset_audio_cfg(cfg: Dict[str, Any]) -> Dict[str, float]:
         "fixed_duration_seconds": float(dataset_cfg.get("fixed_duration_seconds", 15.0)),
         "train_noise_max_amp": float(dataset_cfg.get("train_noise_max_amp", 0.005)),
     }
+
+
+def build_dataloader(
+    dataset,
+    *,
+    batch_size: int,
+    shuffle: bool,
+    collate_fn,
+    requested_workers: int,
+    use_cuda: bool,
+    cfg: Dict[str, Any],
+) -> DataLoader:
+    training_cfg = cfg.get("training", {})
+    system = platform.system()
+    if system == "Windows":
+        num_workers = 0
+    else:
+        num_workers = max(0, int(requested_workers))
+
+    loader_kwargs: Dict[str, Any] = {
+        "dataset": dataset,
+        "batch_size": batch_size,
+        "shuffle": shuffle,
+        "num_workers": num_workers,
+        "collate_fn": collate_fn,
+        "pin_memory": bool(use_cuda and training_cfg.get("pin_memory", True)),
+    }
+
+    if num_workers > 0:
+        loader_kwargs["multiprocessing_context"] = "spawn"
+        loader_kwargs["prefetch_factor"] = int(training_cfg.get("prefetch_factor", 1))
+        loader_kwargs["persistent_workers"] = bool(training_cfg.get("persistent_workers", False))
+
+    return DataLoader(**loader_kwargs)
 
 
 def main() -> None:
@@ -110,22 +148,6 @@ def main() -> None:
         sample_rate=sr,
     )
 
-    # For end-to-end latency (disk I/O + feature extraction + model), default to
-    # single-process DataLoader timing by using num_workers=0.
-    if platform.system() == "Windows":
-        num_workers = 0
-    else:
-        num_workers = int(args.latency_num_workers)
-    batch_size = int(cfg["training"]["batch_size"])
-
-    test_loader = DataLoader(
-        test_ds,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        collate_fn=collate_fn,
-    )
-
     num_labels = int(cfg["model"]["num_labels"])
     ctc_vocab_size = ctc_tokenizer.vocab_size
 
@@ -147,11 +169,24 @@ def main() -> None:
     model.load_state_dict(state)
     model.eval()
 
-    device_str = str(cfg["training"].get("device", "cuda")).lower()
-    if device_str == "cuda" and not torch.cuda.is_available():
-        device_str = "cpu"
+    device_str = resolve_runtime_device(str(cfg["training"].get("device", "cuda")))
     device = torch.device(device_str)
     model.to(device)
+    use_cuda = device.type == "cuda"
+
+    # For end-to-end latency (disk I/O + feature extraction + model), default to
+    # single-process DataLoader timing by using num_workers=0.
+    requested_workers = 0 if platform.system() == "Windows" else int(args.latency_num_workers)
+    batch_size = int(cfg["training"]["batch_size"])
+    test_loader = build_dataloader(
+        test_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_fn,
+        requested_workers=requested_workers,
+        use_cuda=use_cuda,
+        cfg=cfg,
+    )
 
     all_labels: List[int] = []
     all_preds: List[int] = []

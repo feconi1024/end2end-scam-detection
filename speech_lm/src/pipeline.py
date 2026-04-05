@@ -2,33 +2,71 @@
 Main orchestration logic for the SLM scam detection pipeline.
 """
 
+import time
 from pathlib import Path
+
+import librosa
 
 from .audio_utils import load_audio_for_qwen
 from .config_loader import load_settings
-from .slm_engine import SpeechLanguageModel
+from .slm_engine import DEFAULT_SAMPLING_RATE, SpeechLanguageModel
 
 
 def run_pipeline(
     audio_path: str | Path,
     config_path: str | Path | None = None,
     prompt_path: str | Path | None = None,
+    slm: SpeechLanguageModel | None = None,
 ) -> dict:
     """
     Run the full scam detection pipeline: load audio -> SLM inference -> JSON result.
 
     Args:
         audio_path: Path to the target audio file (.wav, .mp3, etc.).
-        config_path: Optional path to settings.yaml.
+        config_path: Optional path to settings.yaml (used only when slm is None).
         prompt_path: Optional path to system prompt.txt.
+        slm: Optional pre-loaded SpeechLanguageModel; if provided, the model is
+            not loaded again (use this when processing multiple files).
 
     Returns:
-        Parsed JSON result from the model.
+        Parsed JSON result from the model, with added keys:
+        - inference_time_sec: total wall-clock inference time (seconds)
+        - inference_time_per_min_audio_sec: inference seconds per 1 minute of audio
+        - audio_duration_sec: duration of the input audio in seconds
     """
-    slm = SpeechLanguageModel(config_path=config_path)
-    target_sr = slm.sampling_rate
+    audio_path = Path(audio_path)
 
-    audio = load_audio_for_qwen(audio_path, target_sr=target_sr)
+    if slm is not None:
+        target_sr = slm.sampling_rate
+        try:
+            audio = load_audio_for_qwen(audio_path, target_sr=target_sr)
+        except (FileNotFoundError, ValueError, OSError) as e:
+            return {
+                "skipped": True,
+                "audio_file": str(audio_path),
+                "error": str(e),
+            }
+    else:
+        # Load audio first so we skip the heavy model load when the file is unloadable
+        try:
+            audio = load_audio_for_qwen(audio_path, target_sr=DEFAULT_SAMPLING_RATE)
+        except (FileNotFoundError, ValueError, OSError) as e:
+            return {
+                "skipped": True,
+                "audio_file": str(audio_path),
+                "error": str(e),
+            }
+        slm = SpeechLanguageModel(config_path=config_path)
+        target_sr = slm.sampling_rate
+        if target_sr != DEFAULT_SAMPLING_RATE:
+            audio = librosa.resample(
+                audio.astype(float),
+                orig_sr=DEFAULT_SAMPLING_RATE,
+                target_sr=target_sr,
+            ).astype(audio.dtype)
+
+    audio_duration_sec = len(audio) / float(target_sr)
+    duration_min = audio_duration_sec / 60.0
 
     if prompt_path is None:
         prompt_path = Path(__file__).resolve().parents[1] / "config" / "prompt.txt"
@@ -41,9 +79,18 @@ def run_pipeline(
         "Output the JSON block as specified in the system instructions."
     )
 
+    t0 = time.perf_counter()
     result = slm.analyze_audio(
         audio_array=audio,
         prompt_text=user_prompt,
         system_prompt=system_prompt,
     )
+    inference_time_sec = time.perf_counter() - t0
+
+    result["inference_time_sec"] = round(inference_time_sec, 3)
+    result["inference_time_per_min_audio_sec"] = (
+        round(inference_time_sec / duration_min, 3) if duration_min > 0 else None
+    )
+    result["audio_duration_sec"] = round(audio_duration_sec, 3)
+
     return result

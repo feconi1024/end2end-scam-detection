@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Tuple
 
+import librosa
 import numpy as np
 import pandas as pd
 import soundfile as sf
 import torch
-from datasets import Audio, Dataset, DatasetDict, load_from_disk
+from datasets import Dataset, DatasetDict, load_from_disk
 from transformers import WhisperProcessor
 
 
 DEFAULT_LABELS: Tuple[str, str] = ("non_scam", "scam")
+logger = logging.getLogger(__name__)
 
 
 def build_label_mappings(config: Mapping[str, Any]) -> Tuple[Dict[str, int], Dict[int, str]]:
@@ -70,7 +73,7 @@ def _build_dataset_from_manifest(manifest: Path, root_dir: Path, sampling_rate: 
             p_path = p_path.resolve()
         return str(p_path)
 
-    df["audio"] = df["path"].apply(_resolve_path)
+    df["audio_path"] = df["path"].apply(_resolve_path)
 
     if "transcript" not in df.columns:
         df["transcript"] = ""
@@ -81,13 +84,12 @@ def _build_dataset_from_manifest(manifest: Path, root_dir: Path, sampling_rate: 
         except Exception:
             return float("nan")
 
-    df["audio_duration_seconds"] = df["audio"].apply(_duration_seconds)
+    df["audio_duration_seconds"] = df["audio_path"].apply(_duration_seconds)
 
     ds = Dataset.from_pandas(
-        df[["audio", "label", "transcript", "audio_duration_seconds"]],
+        df[["audio_path", "label", "transcript", "audio_duration_seconds"]],
         preserve_index=False,
     )
-    ds = ds.cast_column("audio", Audio(sampling_rate=sampling_rate))
     return ds
 
 
@@ -121,7 +123,6 @@ def _load_dataset_dict_from_path(
     if dataset_path.is_dir():
         try:
             dataset_dict = load_from_disk(str(dataset_path))
-            dataset_dict = dataset_dict.cast_column("audio", Audio(sampling_rate=sampling_rate))
 
             if train_split not in dataset_dict:
                 raise KeyError(
@@ -169,7 +170,6 @@ def _load_dataset_dict_from_path(
         return dataset_dict, eval_split
 
     dataset_dict = load_from_disk(str(dataset_path))
-    dataset_dict = dataset_dict.cast_column("audio", Audio(sampling_rate=sampling_rate))
     return dataset_dict, eval_split
 
 
@@ -219,7 +219,7 @@ def load_and_prepare_classification_datasets(
         remove_columns=[
             col
             for col in dataset_dict[train_split].column_names
-            if col not in ("audio", "label", "class_label", "audio_duration_seconds")
+            if col not in ("audio", "audio_path", "label", "class_label", "audio_duration_seconds")
         ],
         num_proc=num_proc,
     )
@@ -235,27 +235,59 @@ class DataCollatorAudioClassificationWithPadding:
         fe = self.processor.feature_extractor
         input_feats_list: List[Dict[str, Any]] = []
         labels: List[int] = []
+        invalid_paths: List[str] = []
 
         for feature in features:
-            audio = feature["audio"]
-            array = audio["array"]
-            sr = audio["sampling_rate"]
+            audio_path = feature.get("audio_path")
+            if audio_path is None:
+                audio_value = feature.get("audio")
+                if isinstance(audio_value, str):
+                    audio_path = audio_value
+                elif isinstance(audio_value, dict):
+                    audio_path = audio_value.get("path")
 
-            sampling_rate = getattr(fe, "sampling_rate", sr)
-            if sr != sampling_rate:
-                duration = array.shape[0] / sr
-                target_len = int(duration * sampling_rate)
-                x_old = np.linspace(0, 1, num=array.shape[0])
-                x_new = np.linspace(0, 1, num=target_len)
-                array = np.interp(x_new, x_old, array).astype(np.float32)
+            try:
+                if not audio_path:
+                    raise ValueError("Missing audio path.")
+                if not Path(audio_path).exists():
+                    raise FileNotFoundError(f"Audio file not found: {audio_path}")
+                sampling_rate = int(getattr(fe, "sampling_rate", 16000))
+                array, _ = librosa.load(
+                    str(audio_path),
+                    sr=sampling_rate,
+                    mono=True,
+                )
+                if array.ndim > 1:
+                    array = np.mean(array, axis=0)
+                array = np.asarray(array, dtype=np.float32)
 
+                inputs = fe(
+                    array,
+                    sampling_rate=sampling_rate,
+                    return_attention_mask=False,
+                )
+                input_feats_list.append({"input_features": inputs["input_features"][0]})
+                labels.append(int(feature["class_label"]))
+            except Exception:
+                invalid_paths.append(str(audio_path))
+                continue
+
+        if invalid_paths:
+            preview = ", ".join(invalid_paths[:3])
+            suffix = "" if len(invalid_paths) <= 3 else f" (+{len(invalid_paths) - 3} more)"
+            logger.warning("Skipping %d invalid audio file(s): %s%s", len(invalid_paths), preview, suffix)
+
+        if not input_feats_list:
+            sampling_rate = int(getattr(fe, "sampling_rate", 16000))
+            dummy_audio = np.zeros(int(sampling_rate * 0.1), dtype=np.float32)
             inputs = fe(
-                array,
+                dummy_audio,
                 sampling_rate=sampling_rate,
                 return_attention_mask=False,
             )
             input_feats_list.append({"input_features": inputs["input_features"][0]})
-            labels.append(int(feature["class_label"]))
+            fallback_label = int(features[0].get("class_label", 0)) if features else 0
+            labels.append(fallback_label)
 
         batch = fe.pad(
             input_feats_list,

@@ -12,10 +12,13 @@ lora: {}            # no LoRA when using SML JSON targets
 
 # Train on BOTH Transcript and Intent to ground the model's semantic understanding
 train_intent_only: false
+intent_first: true                  # adaptive choice for scam detection: emphasize the label in the seq2seq loss
 include_domain: false               # TeleAntiFraud is single-domain; constant "telephony" adds no signal
 domain: "telephony"
+audio_chunk_seconds: 30.0           # Whisper feature extractor truncates/pads to 30s by default
+align_transcript_to_audio_chunk: true
 max_label_tokens: 448               # hard Whisper decoder budget
-max_text_target_tokens: 256         # keep long call transcripts from crowding out the final Intent field
+max_text_target_tokens: 96          # keep transcript supervision aligned with the 30s audio window
 
 training:
   output_dir: "outputs/whislu"
@@ -38,5 +41,5 @@ training:
   generation_max_length: 448          # eval generation budget for the JSON target sequence
 
 inference:
-  max_new_tokens: 320                 # enough for capped transcript + trailing intent JSON
+  max_new_tokens: 160                 # shorter decode budget for intent-first JSON + short transcript prefix
   intent_only_max_new_tokens: 8       # only meaningful when train_intent_only=true

@@ -74,6 +74,7 @@ def prepare_dataset_mapping_fn(
     default_domain = str(config.get("domain", "telephony"))
     include_domain = bool(config.get("include_domain", False))
     intent_only = bool(config.get("train_intent_only", False))
+    intent_first = bool(config.get("intent_first", True))
     max_label_tokens = int(config.get("max_label_tokens", 448))
     max_text_target_tokens_cfg = config.get("max_text_target_tokens")
     max_text_target_tokens = (
@@ -81,6 +82,8 @@ def prepare_dataset_mapping_fn(
         if max_text_target_tokens_cfg is not None
         else None
     )
+    align_transcript_to_audio_chunk = bool(config.get("align_transcript_to_audio_chunk", True))
+    audio_chunk_seconds = float(config.get("audio_chunk_seconds", 30.0))
     domain_column = config.get("domain_column")
 
     def _stringify(value: Any) -> str:
@@ -110,11 +113,18 @@ def prepare_dataset_mapping_fn(
         domain: str,
     ) -> Dict[str, str]:
         json_obj: Dict[str, str] = {}
-        if not intent_only:
-            json_obj["Text"] = transcript
-            if include_domain:
-                json_obj["Domain"] = domain
-        json_obj["Intent"] = intent
+        if intent_first:
+            json_obj["Intent"] = intent
+            if not intent_only:
+                json_obj["Text"] = transcript
+                if include_domain:
+                    json_obj["Domain"] = domain
+        else:
+            if not intent_only:
+                json_obj["Text"] = transcript
+                if include_domain:
+                    json_obj["Domain"] = domain
+            json_obj["Intent"] = intent
         return json_obj
 
     def _encode_text(text: str) -> List[int]:
@@ -137,8 +147,20 @@ def prepare_dataset_mapping_fn(
             raw_transcript = _stringify(batch.get(txt_col))
             transcript = raw_transcript
 
+            if align_transcript_to_audio_chunk and transcript:
+                duration_seconds = batch.get("audio_duration_seconds")
+                try:
+                    duration_seconds = float(duration_seconds)
+                except (TypeError, ValueError):
+                    duration_seconds = None
+
+                if duration_seconds is not None and duration_seconds > audio_chunk_seconds:
+                    ratio = max(0.05, min(1.0, audio_chunk_seconds / duration_seconds))
+                    approx_chars = max(1, int(len(transcript) * ratio))
+                    transcript = transcript[:approx_chars]
+
             # Reserve explicit budget for the trailing Intent field so that
-            # long telephone-call transcripts do not truncate the main label.
+            # the transcript body does not crowd out the main label.
             envelope_obj = _build_json_obj(
                 transcript="",
                 intent=intent,
@@ -243,8 +265,16 @@ def load_and_prepare_datasets(
         if "transcript" not in df.columns:
             df["transcript"] = ""
 
+        def _duration_seconds(path_str: str) -> float:
+            try:
+                return float(sf.info(path_str).duration)
+            except Exception:
+                return float("nan")
+
+        df["audio_duration_seconds"] = df["audio"].apply(_duration_seconds)
+
         ds = Dataset.from_pandas(
-            df[["audio", "label", "transcript"]],
+            df[["audio", "label", "transcript", "audio_duration_seconds"]],
             preserve_index=False,
         )
         ds = ds.cast_column("audio", Audio(sampling_rate=sampling_rate))
@@ -326,7 +356,7 @@ def load_and_prepare_datasets(
         remove_columns=[
             col
             for col in dataset_dict[train_split].column_names
-            if col not in ("audio", "label", "labels")
+            if col not in ("audio", "label", "labels", "audio_duration_seconds")
         ],
         num_proc=num_proc,
     )

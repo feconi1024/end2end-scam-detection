@@ -13,6 +13,12 @@ from transformers import WhisperProcessor
 logger = logging.getLogger(__name__)
 
 
+def _strip_whisper_prompt_tokens(text: str) -> str:
+    # Robust against older checkpoints / generation configs that still leak
+    # Whisper prompt tokens like <|translate|> or <|notimestamps|>.
+    return re.sub(r"<\|[^|]+?\|>", "", text)
+
+
 def _json_get_case_insensitive(obj: Mapping[str, Any], key: str) -> Any:
     for current_key, value in obj.items():
         if isinstance(current_key, str) and current_key.lower() == key.lower():
@@ -63,6 +69,7 @@ def parse_multitask_output(
         text = text[len(bos_token) :]
     if eos_token and eos_token in text:
         text = text.split(eos_token, 1)[0]
+    text = _strip_whisper_prompt_tokens(text).strip()
 
     start = text.find("{")
     end = text.rfind("}")

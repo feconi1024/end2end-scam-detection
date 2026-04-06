@@ -44,32 +44,25 @@ def configure_generation_for_json(
     if not hasattr(model, "_whislu_original_retrieve_init_tokens"):
         model._whislu_original_retrieve_init_tokens = model._retrieve_init_tokens
 
-        def _retrieve_init_tokens_without_notimestamps(self, *args, **kwargs):
-            init_tokens = self._whislu_original_retrieve_init_tokens(*args, **kwargs)
-            generation_config = kwargs.get("generation_config")
-            if generation_config is None and len(args) >= 3:
-                generation_config = args[2]
-
-            no_timestamps_token_id = getattr(generation_config, "no_timestamps_token_id", None)
-            if no_timestamps_token_id is None:
-                return init_tokens
-
-            if (
-                isinstance(init_tokens, torch.Tensor)
-                and init_tokens.ndim == 2
-                and init_tokens.shape[1] > 1
-                and torch.all(init_tokens[:, -1] == no_timestamps_token_id)
-            ):
-                # HF Whisper auto-appends <|notimestamps|> when
-                # return_timestamps=False. Our labels were trained from SOT-only,
-                # so remove that trailing prompt token while keeping
-                # `no_timestamps_token_id` intact for internal generation logic.
-                init_tokens = init_tokens[:, :-1]
-
-            return init_tokens
+        def _retrieve_sot_only_init_tokens(
+            self,
+            input_features,
+            batch_size,
+            generation_config,
+            config,
+            num_segment_frames,
+            kwargs,
+        ):
+            del input_features, generation_config, config, num_segment_frames, kwargs
+            return torch.full(
+                (batch_size, 1),
+                fill_value=self.config.decoder_start_token_id,
+                dtype=torch.long,
+                device=self.device,
+            )
 
         model._retrieve_init_tokens = MethodType(
-            _retrieve_init_tokens_without_notimestamps,
+            _retrieve_sot_only_init_tokens,
             model,
         )
 

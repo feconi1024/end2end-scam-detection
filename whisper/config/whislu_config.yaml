@@ -17,6 +17,7 @@ include_domain: false               # TeleAntiFraud is single-domain; constant "
 domain: "telephony"
 audio_chunk_seconds: 30.0           # Whisper feature extractor truncates/pads to 30s by default
 align_transcript_to_audio_chunk: true
+intent_loss_weight: 8.0             # upweight the early Intent field so seq2seq loss is not dominated by transcript tokens
 max_label_tokens: 448               # hard Whisper decoder budget
 max_text_target_tokens: 96          # keep transcript supervision aligned with the 30s audio window
 

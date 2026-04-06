@@ -1,8 +1,10 @@
 dataset:
   # CSV manifests with columns: path, label, [transcript]
-  train_manifest: "TeleAntiFraud-28k/train_manifest.csv"
-  val_manifest: "TeleAntiFraud-28k/val_manifest.csv"
-  test_manifest: "TeleAntiFraud-28k/test_manifest.csv"
+  # Standard corrected split: labels come from TeleAntiFraud family prefixes
+  # (NEG -> scam, POS -> non_scam), not from tts_fraud / tts_test filenames.
+  train_manifest: "TeleAntiFraud-28k/corrected_manifests/train_manifest.csv"
+  val_manifest: "TeleAntiFraud-28k/corrected_manifests/val_manifest.csv"
+  test_manifest: "TeleAntiFraud-28k/corrected_manifests/test_manifest.csv"
 
   # Audio loading
   sample_rate: 16000
@@ -51,7 +53,8 @@ training:
   mixed_precision: "bf16"
 
   device: "cuda"   # "cuda" or "cpu"; respects CUDA_VISIBLE_DEVICES on Linux/Slurm
-  # Use conservative worker settings on Linux/Slurm to avoid worker OOMs after CUDA init.
+  # Restore normal Linux DataLoader throughput now that CUDA init is deferred
+  # until after worker startup and no silent CPU fallback is used.
   num_workers: 1
   prefetch_factor: 1
   persistent_workers: false

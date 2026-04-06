@@ -27,6 +27,46 @@ def load_config(config_path: Union[str, Path]) -> ConfigDict:
     return cfg
 
 
+def resolve_manifest_audio_path(
+    manifest_path: Union[str, Path],
+    audio_path_value: Union[str, Path],
+) -> Path:
+    """
+    Resolve an audio path from a manifest row robustly.
+
+    Some manifests live in nested output folders such as
+    `TeleAntiFraud-28k/corrected_manifests/`, while the stored row path may
+    still start with `TeleAntiFraud-28k/...`. In that case, resolving only
+    against `manifest.parent` is wrong and can make every example disappear.
+    """
+
+    manifest = Path(manifest_path).resolve()
+    raw_path = Path(audio_path_value)
+    if raw_path.is_absolute():
+        return raw_path
+
+    candidate_roots: List[Path] = []
+    seen: set[str] = set()
+    current = manifest.parent
+    for _ in range(6):
+        key = current.as_posix()
+        if key not in seen:
+            candidate_roots.append(current)
+            seen.add(key)
+        if current.parent == current:
+            break
+        current = current.parent
+
+    for root in candidate_roots:
+        candidate = (root / raw_path).resolve()
+        if candidate.exists():
+            return candidate
+
+    # Fall back to the original manifest-relative behavior so the warning below
+    # prints a deterministic path.
+    return (manifest.parent / raw_path).resolve()
+
+
 @dataclass
 class TeleAntiFraudExample:
     audio_path: Path
@@ -220,9 +260,7 @@ class TeleAntiFraudDataset(Dataset):
                 if label_str is None:
                     raise ValueError("Manifest row missing 'label' column.")
                 transcript = row.get("transcript") or None
-                audio_path = Path(path_str)
-                if not audio_path.is_absolute():
-                    audio_path = (self.manifest_path.parent / audio_path).resolve()
+                audio_path = resolve_manifest_audio_path(self.manifest_path, path_str)
 
                 if not audio_path.exists():
                     # Skip missing files but warn once per missing path.
@@ -239,6 +277,12 @@ class TeleAntiFraudDataset(Dataset):
                         transcript=transcript,
                     )
                 )
+
+        if len(self.examples) == 0:
+            raise ValueError(
+                "No valid audio examples were found for manifest "
+                f"{self.manifest_path}. Check the manifest paths and dataset layout."
+            )
 
         # Build label mapping if not provided
         if label_mapping is None:

@@ -8,6 +8,7 @@ import json
 import numpy as np
 import pandas as pd
 import soundfile as sf
+import torch
 import yaml
 from datasets import Audio, Dataset, DatasetDict, load_from_disk
 from transformers import WhisperProcessor
@@ -477,16 +478,25 @@ class DataCollatorSpeechSeq2SeqWithPadding:
             padding=True,
             return_tensors="pt",
         )
-        weights_batch = self.processor.tokenizer.pad(
-            weight_features,
-            padding=True,
-            return_tensors="pt",
-        )
-
         labels = labels_batch["input_ids"]
         labels = labels.masked_fill(labels_batch.attention_mask.ne(1), -100)
         batch["labels"] = labels
-        loss_weights = weights_batch["input_ids"].to(batch["input_features"].dtype)
+
+        max_label_len = labels_batch["input_ids"].shape[1]
+        weight_tensors = []
+        for feature in weight_features:
+            weights = torch.tensor(feature["input_ids"], dtype=batch["input_features"].dtype)
+            if weights.shape[0] < max_label_len:
+                pad_len = max_label_len - weights.shape[0]
+                weights = torch.cat(
+                    [weights, torch.zeros(pad_len, dtype=weights.dtype)],
+                    dim=0,
+                )
+            else:
+                weights = weights[:max_label_len]
+            weight_tensors.append(weights)
+
+        loss_weights = torch.stack(weight_tensors, dim=0)
         loss_weights = loss_weights.masked_fill(labels_batch.attention_mask.ne(1), 0.0)
         batch["loss_weights"] = loss_weights
         return batch

@@ -5,8 +5,6 @@ import random
 import sys
 from pathlib import Path
 
-from transformers import Seq2SeqTrainer
-
 _whisper_root = Path(__file__).resolve().parent
 if str(_whisper_root / "src") not in sys.path:
     sys.path.insert(0, str(_whisper_root / "src"))
@@ -18,7 +16,7 @@ from src.data_processor import (
     load_config,
 )
 from src.evaluator import build_compute_metrics_fn
-from src.trainer import create_training_arguments
+from src.trainer import WeightedLossSeq2SeqTrainer, create_training_arguments
 from src.whislu_model import load_whislu_for_inference
 
 
@@ -126,7 +124,7 @@ def main() -> int:
 
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor)
 
-    trainer = Seq2SeqTrainer(
+    trainer = WeightedLossSeq2SeqTrainer(
         model=model,
         args=eval_args,
         train_dataset=None,

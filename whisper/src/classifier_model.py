@@ -17,8 +17,20 @@ class WhisperEncoderForScamClassification(WhisperPreTrainedModel):
     better fit for the repo's primary binary scam-detection task.
     """
 
-    def __init__(self, config):
+    def __init__(
+        self,
+        config,
+        classifier_dropout: float | None = None,
+        classifier_pooling: str | None = None,
+        **kwargs,
+    ):
+        del kwargs
         super().__init__(config)
+        if classifier_dropout is not None:
+            config.classifier_dropout = float(classifier_dropout)
+        if classifier_pooling is not None:
+            config.classifier_pooling = str(classifier_pooling)
+
         self.num_labels = int(getattr(config, "num_labels", 2))
         self.pooling = str(getattr(config, "classifier_pooling", "mean"))
         dropout = float(getattr(config, "classifier_dropout", 0.1))

@@ -1,16 +1,45 @@
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
+import re
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 import evaluate
-import json
-import re
 import numpy as np
 from sklearn.metrics import f1_score
 from transformers import WhisperProcessor
 
 logger = logging.getLogger(__name__)
+
+
+def _json_get_case_insensitive(obj: Mapping[str, Any], key: str) -> Any:
+    for current_key, value in obj.items():
+        if isinstance(current_key, str) and current_key.lower() == key.lower():
+            return value
+    return None
+
+
+def _canonical_intent_label(intent: str | None) -> str | None:
+    """
+    Map arbitrary intent text to a canonical label string.
+    """
+    if intent is None:
+        return None
+
+    text = intent.strip().lower()
+    if not text:
+        return None
+
+    # Check the negative class first to avoid matching the substring "scam"
+    # inside labels like "non_scam".
+    if "non_scam" in text or "non scam" in text or "not_scam" in text or "not scam" in text:
+        return "non_scam"
+    if text == "ham":
+        return "non_scam"
+    if "scam" in text or "fraud" in text:
+        return "scam"
+    return None
 
 
 def parse_multitask_output(
@@ -22,71 +51,58 @@ def parse_multitask_output(
     """
     Parse a JSON-formatted multitask output into (intent, transcript_text).
 
-    Expected structure (whitespace and ordering may vary):
+    Expected structure:
+      <|startoftranscript|>{"Text":"...","Intent":"scam"}<|endoftext|>
 
-      <|startoftranscript|>{
-        "Text": "...",
-        "Domain": "telephony",
-        "Intent": "scam"
-      }<|endoftext|>
+    The parser is intentionally tolerant because malformed JSON is itself a
+    useful debugging signal for this project.
     """
-    # Strip BOS/EOS wrappers if present
+    del special_tokens
+
     if bos_token and text.startswith(bos_token):
         text = text[len(bos_token) :]
     if eos_token and eos_token in text:
         text = text.split(eos_token, 1)[0]
 
-    # Extract JSON substring
     start = text.find("{")
     end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        return None, None
+    if start != -1 and end != -1 and end > start:
+        json_part = text[start : end + 1]
+        try:
+            obj = json.loads(json_part)
+            intent = _json_get_case_insensitive(obj, "Intent")
+            transcript = _json_get_case_insensitive(obj, "Text")
 
-    json_part = text[start : end + 1]
-    try:
-        obj = json.loads(json_part)
-    except Exception:
-        # Fallback: try to recover intent/text via regex even if JSON is malformed
-        intent_match = re.search(r'"Intent"\s*:\s*"([^"]+)"', text)
-        text_match = re.search(r'"Text"\s*:\s*"([^"]+)"', text)
-        intent = intent_match.group(1).strip() if intent_match else None
-        transcript = text_match.group(1).strip() if text_match else None
-        if not intent and not transcript:
-            return None, None
-        return (intent or None), (transcript or None)
+            if isinstance(intent, str):
+                intent = intent.strip() or None
+            else:
+                intent = None
 
-    intent = obj.get("Intent")
-    transcript = obj.get("Text")
-    if isinstance(intent, str):
-        intent = intent.strip() or None
-    else:
-        intent = None
-    if isinstance(transcript, str):
-        transcript = transcript.strip() or None
-    else:
-        transcript = None
+            if isinstance(transcript, str):
+                transcript = transcript.strip() or None
+            else:
+                transcript = None
 
-    return intent, transcript
+            return intent, transcript
+        except Exception:
+            pass
 
+    intent_match = re.search(r'"intent"\s*:\s*"([^"]+)"', text, flags=re.IGNORECASE)
+    text_match = re.search(r'"text"\s*:\s*"([^"]+)"', text, flags=re.IGNORECASE)
+    intent = intent_match.group(1).strip() if intent_match else None
+    transcript = text_match.group(1).strip() if text_match else None
+    if intent or transcript:
+        return intent or None, transcript or None
 
-def _canonical_intent_label(intent: str | None) -> str | None:
-    """
-    Map arbitrary intent text to a canonical label string ("scam" or "non_scam"),
-    using simple heuristics. This makes evaluation robust to minor formatting
-    differences in the generated JSON.
-    """
-    if intent is None:
-        return None
-    t = intent.strip().lower()
-    if not t:
-        return None
+    # Recovery path for heavily malformed outputs such as:
+    #   "scam", "telephony", "telephony", ...
+    quoted_values = re.findall(r'"([^"]+)"', text)
+    for value in quoted_values:
+        if _canonical_intent_label(value) is not None:
+            cleaned = value.strip()
+            return cleaned or None, None
 
-    # Non-scam heuristics first to avoid matching the substring "scam" inside.
-    if "non_scam" in t or "non scam" in t or "not_scam" in t or "not scam" in t:
-        return "non_scam"
-    if "scam" in t or "fraud" in t:
-        return "scam"
-    return None
+    return None, None
 
 
 def build_compute_metrics_fn(
@@ -97,9 +113,12 @@ def build_compute_metrics_fn(
     """
     Create a compute_metrics function for Seq2SeqTrainer that:
     - Extracts intents and transcripts from JSON-formatted sequences.
-    - Computes F1 over intents.
+    - Computes macro F1 over intents.
     - Computes WER over transcripts.
+    - Reports how often a valid intent could be recovered from predictions.
     """
+    del label2token
+
     wer_metric = evaluate.load("wer")
 
     bos_token = processor.tokenizer.bos_token or "<|startoftranscript|>"
@@ -116,7 +135,6 @@ def build_compute_metrics_fn(
             skip_special_tokens=False,
         )
 
-        # Replace -100 with pad token id so that batch_decode works
         label_ids_clean = np.where(
             label_ids != -100,
             label_ids,
@@ -131,43 +149,45 @@ def build_compute_metrics_fn(
         true_intents: List[str] = []
         pred_transcripts: List[str] = []
         true_transcripts: List[str] = []
+        valid_pred_intent_count = 0
 
-        # Log a few sample predictions for debugging
         num_debug = min(5, len(pred_str))
         for i in range(num_debug):
             logger.info(
                 "EVAL SAMPLE %d | pred: %.200s | label: %.200s",
-                i, pred_str[i], label_str[i],
+                i,
+                pred_str[i],
+                label_str[i],
             )
 
-        for p, t in zip(pred_str, label_str):
-            p_intent, p_text = parse_multitask_output(
-                p,
+        for predicted_text, target_text in zip(pred_str, label_str):
+            pred_intent, pred_transcript = parse_multitask_output(
+                predicted_text,
                 special_tokens=special_tokens,
                 bos_token=bos_token,
                 eos_token=eos_token,
             )
-            t_intent, t_text = parse_multitask_output(
-                t,
+            true_intent, true_transcript = parse_multitask_output(
+                target_text,
                 special_tokens=special_tokens,
                 bos_token=bos_token,
                 eos_token=eos_token,
             )
 
-            # Canonicalize to {scam, non_scam} labels
-            true_lbl = _canonical_intent_label(t_intent)
-            pred_lbl = _canonical_intent_label(p_intent)
+            true_label = _canonical_intent_label(true_intent)
+            pred_label = _canonical_intent_label(pred_intent)
 
-            if true_lbl is not None:
-                true_intents.append(true_lbl)
-                # Treat unknown/invalid predictions as a special wrong label
-                pred_intents.append(pred_lbl if pred_lbl is not None else "__invalid__")
+            if true_label is not None:
+                true_intents.append(true_label)
+                canonical_pred = pred_label if pred_label is not None else "__invalid__"
+                pred_intents.append(canonical_pred)
+                if canonical_pred != "__invalid__":
+                    valid_pred_intent_count += 1
 
-            if t_text is not None:
-                true_transcripts.append(t_text)
-                pred_transcripts.append(p_text or "")
+            if true_transcript is not None:
+                true_transcripts.append(true_transcript)
+                pred_transcripts.append(pred_transcript or "")
 
-        # Intent F1 (single-label classification)
         if true_intents:
             intent_f1 = f1_score(
                 true_intents,
@@ -175,22 +195,23 @@ def build_compute_metrics_fn(
                 average="macro",
                 zero_division=0.0,
             )
+            intent_valid_rate = valid_pred_intent_count / len(true_intents)
         else:
             intent_f1 = 0.0
+            intent_valid_rate = 0.0
 
-        # WER on transcripts – filter out empty references
         filtered_pairs = [
-            (p, t)
-            for p, t in zip(pred_transcripts, true_transcripts)
-            if t is not None and t.strip() != ""
+            (predicted, reference)
+            for predicted, reference in zip(pred_transcripts, true_transcripts)
+            if reference is not None and reference.strip() != ""
         ]
 
         if filtered_pairs:
-            f_pred, f_true = zip(*filtered_pairs)
+            filtered_pred, filtered_true = zip(*filtered_pairs)
             wer = float(
                 wer_metric.compute(
-                    predictions=list(f_pred),
-                    references=list(f_true),
+                    predictions=list(filtered_pred),
+                    references=list(filtered_true),
                 )
             )
         else:
@@ -200,15 +221,15 @@ def build_compute_metrics_fn(
             "EVAL SUMMARY | n_samples=%d | n_valid_intents=%d | n_invalid_preds=%d | f1=%.4f | wer=%.4f",
             len(pred_str),
             len(true_intents),
-            sum(1 for p in pred_intents if p == "__invalid__"),
+            sum(1 for label in pred_intents if label == "__invalid__"),
             float(intent_f1),
             wer,
         )
 
         return {
             "intent_f1_macro": float(intent_f1),
+            "intent_valid_rate": float(intent_valid_rate),
             "wer": wer,
         }
 
     return compute_metrics
-

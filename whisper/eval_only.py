@@ -1,10 +1,11 @@
-from pathlib import Path
-import sys
+from __future__ import annotations
 
-from transformers import (
-    Seq2SeqTrainer,
-    WhisperForConditionalGeneration,
-)
+import argparse
+import random
+import sys
+from pathlib import Path
+
+from transformers import Seq2SeqTrainer
 
 _whisper_root = Path(__file__).resolve().parent
 if str(_whisper_root / "src") not in sys.path:
@@ -18,52 +19,101 @@ from src.data_processor import (
 )
 from src.evaluator import build_compute_metrics_fn
 from src.trainer import create_training_arguments
+from src.whislu_model import load_whislu_for_inference
 
 
-def main():
-    config_path = _whisper_root / "config" / "whislu_config.yaml"
-    dataset_path = Path("TeleAntiFraud-28k")  # adjust if needed
+def _default_dataset_path() -> Path:
+    corrected = Path("TeleAntiFraud-28k") / "corrected_manifests"
+    if corrected.exists():
+        return corrected
+    return Path("TeleAntiFraud-28k")
 
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Evaluate a saved WhiSLU checkpoint on a manifest split."
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=_whisper_root / "config" / "whislu_config.yaml",
+        help="Path to the WhiSLU YAML config.",
+    )
+    parser.add_argument(
+        "--dataset_path",
+        type=Path,
+        default=_default_dataset_path(),
+        help="Path to a saved DatasetDict, a manifest folder, or a single CSV manifest.",
+    )
+    parser.add_argument(
+        "--eval_split",
+        type=str,
+        default="val",
+        help="Evaluation split name. For manifest folders this usually maps to val_manifest.csv.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed used for balanced eval subsampling.",
+    )
+    parser.add_argument(
+        "--model_dir",
+        type=Path,
+        default=None,
+        help="Optional path to a saved fine-tuned model directory.",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+
+    config_path = args.config
     config = load_config(config_path)
     processor, _ = create_processor(config)
     training_cfg = config.get("training", {})
-    model_name = config["model_name"]
 
-    train_ds, eval_ds = load_and_prepare_datasets(
-        dataset_path=dataset_path,
+    _, eval_ds = load_and_prepare_datasets(
+        dataset_path=args.dataset_path,
         processor=processor,
         config=config,
         train_split="train",
-        eval_split="validation",
+        eval_split=args.eval_split,
         num_proc=None,
     )
 
-    # Apply same eval subsampling as train.py to avoid OOM during generation.
     max_eval_samples = int(training_cfg.get("max_eval_samples", 0))
     if max_eval_samples > 0 and len(eval_ds) > max_eval_samples:
-        eval_ds = eval_ds.select(range(max_eval_samples))
+        if "label" in eval_ds.column_names:
+            labels = eval_ds["label"]
+            scam_indices = [i for i, y in enumerate(labels) if y == "scam"]
+            non_indices = [i for i, y in enumerate(labels) if y == "non_scam"]
+            rng = random.Random(args.seed)
+            rng.shuffle(scam_indices)
+            rng.shuffle(non_indices)
+            per_class = max_eval_samples // 2
+            selected = scam_indices[:per_class] + non_indices[:per_class]
+            if len(selected) < max_eval_samples:
+                remaining = max_eval_samples - len(selected)
+                extra = (
+                    scam_indices[per_class : per_class + remaining]
+                    + non_indices[per_class : per_class + remaining]
+                )
+                selected += extra[:remaining]
+            eval_ds = eval_ds.select(selected)
+        else:
+            eval_ds = eval_ds.select(range(max_eval_samples))
 
-    # Load trained full model directly from disk.
-    model_dir = (Path(training_cfg.get("output_dir", "outputs/whislu")) / "model").resolve()
+    default_model_dir = Path(training_cfg.get("output_dir", "outputs/whislu")) / "model"
+    model_dir = (args.model_dir or default_model_dir).resolve()
     if not model_dir.is_dir():
         raise FileNotFoundError(f"Trained model directory not found: {model_dir}")
 
-    model = WhisperForConditionalGeneration.from_pretrained(
-        str(model_dir),
-        torch_dtype=None,  # use checkpoint dtype
-        low_cpu_mem_usage=True,
-        local_files_only=True,
+    model = load_whislu_for_inference(
+        model_dir=str(model_dir),
+        processor=processor,
     )
-
-    # Ensure generation config doesn't enforce language/task tokens so that
-    # JSON-formatted SLU outputs can be produced and evaluated.
-    model.config.forced_decoder_ids = None
-    model.config.suppress_tokens = []
-    if getattr(model, "generation_config", None) is not None:
-        model.generation_config.forced_decoder_ids = None
-        model.generation_config.suppress_tokens = []
-        if hasattr(model.generation_config, "begin_suppress_tokens"):
-            model.generation_config.begin_suppress_tokens = []
 
     compute_metrics = build_compute_metrics_fn(
         processor=processor,
@@ -71,32 +121,25 @@ def main():
         label2token=config.get("label2token", {}),
     )
 
-    # Build eval-only training arguments
     output_dir = Path(training_cfg.get("output_dir", "outputs/whislu"))
     eval_args = create_training_arguments(training_cfg=training_cfg, output_dir=output_dir)
 
-    base_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor)
-
-    def eval_collator(features):
-        # Use the standard collator but drop any auxiliary-only keys such as
-        # intent_labels so that generation sees only the expected kwargs.
-        batch = base_collator(features)
-        batch.pop("intent_labels", None)
-        return batch
+    data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor)
 
     trainer = Seq2SeqTrainer(
         model=model,
         args=eval_args,
         train_dataset=None,
         eval_dataset=eval_ds,
-        data_collator=eval_collator,
+        data_collator=data_collator,
         tokenizer=processor.tokenizer,
         compute_metrics=compute_metrics,
     )
 
     metrics = trainer.evaluate()
     print(metrics)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

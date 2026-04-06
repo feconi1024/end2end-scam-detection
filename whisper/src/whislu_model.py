@@ -6,6 +6,47 @@ import torch
 from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
 
+def configure_generation_for_json(
+    model: WhisperForConditionalGeneration,
+) -> WhisperForConditionalGeneration:
+    """
+    Align Whisper generation with the training target format.
+
+    Our labels are trained as:
+      <|startoftranscript|>{...JSON...}<|endoftext|>
+
+    Hugging Face Whisper generation otherwise auto-injects prompt tokens such
+    as language, task, and <|notimestamps|>, which creates a train/inference
+    mismatch and can easily corrupt the opening JSON tokens.
+    """
+    model.config.forced_decoder_ids = None
+    model.config.suppress_tokens = None
+    if hasattr(model.config, "begin_suppress_tokens"):
+        model.config.begin_suppress_tokens = None
+    if hasattr(model.config, "no_timestamps_token_id"):
+        model.config.no_timestamps_token_id = None
+
+    if getattr(model, "generation_config", None) is not None:
+        model.generation_config.forced_decoder_ids = None
+        model.generation_config.suppress_tokens = None
+        if hasattr(model.generation_config, "begin_suppress_tokens"):
+            model.generation_config.begin_suppress_tokens = None
+        if hasattr(model.generation_config, "language"):
+            model.generation_config.language = None
+        if hasattr(model.generation_config, "task"):
+            model.generation_config.task = None
+        if hasattr(model.generation_config, "no_timestamps_token_id"):
+            model.generation_config.no_timestamps_token_id = None
+        if hasattr(model.generation_config, "return_timestamps"):
+            model.generation_config.return_timestamps = False
+        if hasattr(model.generation_config, "is_multilingual"):
+            # Keep the decoder prompt to SOT-only so generation matches
+            # the SOT-only supervision used during training.
+            model.generation_config.is_multilingual = False
+
+    return model
+
+
 def initialize_whislu_model(
     model_name: str,
     processor: WhisperProcessor,
@@ -31,26 +72,7 @@ def initialize_whislu_model(
     # Do NOT resize token embeddings: we keep the original vocabulary and
     # express SLU targets as JSON strings within the existing token set.
 
-    # Disable Whisper's default forced decoder ids and token suppression so that
-    # the model is free to emit custom JSON immediately after <|startoftranscript|>.
-    # IMPORTANT: Must clear BOTH model.config AND model.generation_config, because
-    # model.generate() reads from generation_config, not model.config.
-    model.config.forced_decoder_ids = None
-    model.config.suppress_tokens = []
-
-    if hasattr(model, "generation_config"):
-        model.generation_config.forced_decoder_ids = None
-        model.generation_config.suppress_tokens = []
-        # Also clear begin_suppress_tokens which can suppress JSON-critical tokens
-        # like '{' and '"' at the start of generation.
-        if hasattr(model.generation_config, "begin_suppress_tokens"):
-            model.generation_config.begin_suppress_tokens = []
-        # Whisper's custom generate() reconstructs forced_decoder_ids from
-        # language/task/is_multilingual even when forced_decoder_ids is None.
-        # Clear these so the decoder is truly free to emit JSON from the start.
-        model.generation_config.language = None
-        model.generation_config.task = None
-        model.generation_config.is_multilingual = False
+    configure_generation_for_json(model)
 
     # Enable gradient checkpointing to significantly reduce memory usage.
     model.config.use_cache = False
@@ -78,18 +100,7 @@ def load_whislu_for_inference(
         low_cpu_mem_usage=True,
     )
 
-    model.config.forced_decoder_ids = None
-    model.config.suppress_tokens = []
-
-    if hasattr(model, "generation_config"):
-        model.generation_config.forced_decoder_ids = None
-        model.generation_config.suppress_tokens = []
-        if hasattr(model.generation_config, "begin_suppress_tokens"):
-            model.generation_config.begin_suppress_tokens = []
-        model.generation_config.language = None
-        model.generation_config.task = None
-        model.generation_config.is_multilingual = False
-
+    configure_generation_for_json(model)
     model.eval()
     return model
 

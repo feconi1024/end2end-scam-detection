@@ -13,7 +13,7 @@ if str(_whisper_root / "src") not in sys.path:
     sys.path.insert(0, str(_whisper_root / "src"))
 
 from src.data_processor import create_processor, load_audio_for_inference, load_config
-from src.evaluator import parse_multitask_output
+from src.evaluator import _canonical_intent_label, parse_multitask_output
 from src.whislu_model import load_whislu_for_inference
 
 
@@ -65,8 +65,8 @@ def run_inference(
     intent_only: bool = False,
 ) -> Dict[str, Any]:
     config = load_config(config_path)
-    model_name = config["model_name"]
     sampling_rate: int = int(config.get("sampling_rate", 16000))
+    warnings: List[str] = []
 
     if processor_dir is not None and processor_dir.exists():
         from transformers import WhisperProcessor
@@ -104,10 +104,18 @@ def run_inference(
         input_tensor = input_tensor.to("cuda")
 
     gen_cfg = config.get("inference", {})
+    train_intent_only = bool(config.get("train_intent_only", False))
+    if intent_only and not train_intent_only:
+        warnings.append(
+            "--intent_only is only meaningful for intent-only checkpoints. "
+            "This model predicts transcript/context before the final intent."
+        )
+        intent_only = False
+
     max_new_tokens = int(
         gen_cfg.get(
             "intent_only_max_new_tokens" if intent_only else "max_new_tokens",
-            128 if not intent_only else 8,
+            int(config.get("max_label_tokens", 448)) if not intent_only else 8,
         )
     )
 
@@ -132,24 +140,23 @@ def run_inference(
         eos_token=eos,
     )
 
-    is_scam: bool | None
-    if intent is None:
-        is_scam = None
+    canonical_intent = _canonical_intent_label(intent)
+    if canonical_intent == "scam":
+        is_scam: bool | None = True
+    elif canonical_intent == "non_scam":
+        is_scam = False
     else:
-        lower_intent = intent.lower()
-        if "scam" in lower_intent or "fraud" in lower_intent:
-            is_scam = True
-        elif "non_scam" in lower_intent or "not_scam" in lower_intent:
-            is_scam = False
-        else:
-            is_scam = None
+        is_scam = None
 
     result: Dict[str, Any] = {
         "intent": intent,
+        "intent_canonical": canonical_intent,
         "is_scam": is_scam,
         "transcript": transcript,
         "raw_decoded": decoded,
     }
+    if warnings:
+        result["warnings"] = warnings
     return result
 
 

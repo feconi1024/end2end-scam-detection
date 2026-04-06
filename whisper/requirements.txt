@@ -3,6 +3,8 @@ transformers>=4.39.0
 datasets
 peft
 librosa
+numpy
+pandas
 soundfile
 evaluate
 scikit-learn

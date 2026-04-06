@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
 import torch
 import torch.nn as nn
-from transformers import WhisperModel, WhisperPreTrainedModel
+from transformers import WhisperConfig, WhisperModel, WhisperPreTrainedModel
 from transformers.modeling_outputs import SequenceClassifierOutput
+
+logger = logging.getLogger(__name__)
 
 
 class WhisperEncoderForScamClassification(WhisperPreTrainedModel):
@@ -102,16 +105,30 @@ def initialize_classifier_model(
     device: str | None = None,
 ) -> WhisperEncoderForScamClassification:
     classifier_cfg = config.get("classifier", {})
-    model = WhisperEncoderForScamClassification.from_pretrained(
+    base_config = WhisperConfig.from_pretrained(model_name)
+    base_config.num_labels = len(label2id)
+    base_config.label2id = dict(label2id)
+    base_config.id2label = {int(idx): label for idx, label in id2label.items()}
+    base_config.classifier_dropout = float(classifier_cfg.get("dropout", 0.1))
+    base_config.classifier_pooling = str(classifier_cfg.get("pooling", "mean"))
+
+    model = WhisperEncoderForScamClassification(base_config)
+    pretrained_whisper = WhisperModel.from_pretrained(
         model_name,
         torch_dtype=torch.float32,
         low_cpu_mem_usage=True,
-        num_labels=len(label2id),
-        label2id=dict(label2id),
-        id2label={int(idx): label for idx, label in id2label.items()},
-        classifier_dropout=float(classifier_cfg.get("dropout", 0.1)),
-        classifier_pooling=str(classifier_cfg.get("pooling", "mean")),
     )
+    missing_keys, unexpected_keys = model.whisper.load_state_dict(
+        pretrained_whisper.state_dict(),
+        strict=True,
+    )
+    if missing_keys or unexpected_keys:
+        raise RuntimeError(
+            "Failed to load pretrained Whisper weights cleanly into the classifier model. "
+            f"Missing: {missing_keys} | Unexpected: {unexpected_keys}"
+        )
+    logger.info("Loaded pretrained Whisper encoder/decoder weights into classifier backbone.")
+    del pretrained_whisper
 
     # The decoder is not used in the encoder-classifier path.
     for parameter in model.whisper.decoder.parameters():

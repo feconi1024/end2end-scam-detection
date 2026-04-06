@@ -1,8 +1,9 @@
 ﻿from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -10,6 +11,8 @@ import soundfile as sf
 import torch
 from torch.utils.data import Dataset
 from transformers import WhisperProcessor
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -238,20 +241,35 @@ class WhisperQACollator:
         self.audio_chunk_seconds = float(self.model_cfg.get("audio_chunk_seconds", 30.0))
         self.align_transcript = bool(self.model_cfg.get("align_transcript_to_audio_chunk", True))
 
-    def __call__(self, features: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    def __call__(self, features: Sequence[Mapping[str, Any]]) -> Dict[str, Any] | None:
         input_features: List[np.ndarray] = []
         label_tensors: List[torch.Tensor] = []
         transcript_cache_ids: List[torch.Tensor] = []
         transcript_texts: List[str] = []
+        valid_features: List[Mapping[str, Any]] = []
+        skipped_audio_paths: List[str] = []
 
         for feature in features:
-            audio = load_audio(Path(feature["audio_path"]), sampling_rate=self.sampling_rate)
+            audio_path = Path(feature["audio_path"])
+            try:
+                audio = load_audio(audio_path, sampling_rate=self.sampling_rate)
+            except Exception as exc:
+                skipped_audio_paths.append(str(audio_path))
+                logger.warning(
+                    "Skipping unreadable audio file in whisper_qa batch: path=%s raw_path=%s error=%s",
+                    audio_path,
+                    feature.get("raw_path", audio_path),
+                    exc,
+                )
+                continue
+
             mel = self.processor.feature_extractor(
                 audio,
                 sampling_rate=self.sampling_rate,
                 return_attention_mask=False,
             )["input_features"][0]
             input_features.append(np.asarray(mel, dtype=np.float32))
+            valid_features.append(feature)
 
             transcript = str(feature.get("transcript", ""))
             duration_seconds = float(feature.get("audio_duration_seconds", float("nan")))
@@ -268,6 +286,14 @@ class WhisperQACollator:
             label_tensors.append(torch.tensor(asr_ids, dtype=torch.long))
             transcript_cache_ids.append(torch.tensor(cache_ids, dtype=torch.long))
 
+        if not valid_features:
+            if skipped_audio_paths:
+                logger.warning(
+                    "Skipping entire whisper_qa batch because all %d audio files were unreadable.",
+                    len(skipped_audio_paths),
+                )
+            return None
+
         max_label_len = max(tensor.shape[0] for tensor in label_tensors)
         padded_labels = torch.full((len(label_tensors), max_label_len), fill_value=-100, dtype=torch.long)
         for idx, tensor in enumerate(label_tensors):
@@ -279,11 +305,13 @@ class WhisperQACollator:
             "asr_labels": padded_labels,
             "transcript_cache_ids": transcript_cache_ids,
             "transcript_texts": transcript_texts,
-            "labels": [str(feature["label"]) for feature in features],
-            "audio_paths": [str(feature["audio_path"]) for feature in features],
-            "audio_durations": [float(feature.get("audio_duration_seconds", float("nan"))) for feature in features],
-            "manifest_paths": [str(feature.get("manifest_path", "")) for feature in features],
-            "split_names": [str(feature.get("split_name", "")) for feature in features],
-            "row_indices": [int(feature.get("index", 0)) for feature in features],
-            "raw_paths": [str(feature.get("raw_path", feature["audio_path"])) for feature in features],
+            "labels": [str(feature["label"]) for feature in valid_features],
+            "audio_paths": [str(feature["audio_path"]) for feature in valid_features],
+            "audio_durations": [float(feature.get("audio_duration_seconds", float("nan"))) for feature in valid_features],
+            "manifest_paths": [str(feature.get("manifest_path", "")) for feature in valid_features],
+            "split_names": [str(feature.get("split_name", "")) for feature in valid_features],
+            "row_indices": [int(feature.get("index", 0)) for feature in valid_features],
+            "raw_paths": [str(feature.get("raw_path", feature["audio_path"])) for feature in valid_features],
+            "num_skipped_examples": len(skipped_audio_paths),
+            "skipped_audio_paths": skipped_audio_paths,
         }

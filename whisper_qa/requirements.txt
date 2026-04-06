@@ -8,3 +8,4 @@ pandas
 soundfile
 scikit-learn
 pyyaml
+tqdm

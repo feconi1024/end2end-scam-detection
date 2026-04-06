@@ -181,8 +181,14 @@ class WhisperQATrainer:
         for epoch in range(1, epochs + 1):
             self.model.train()
             running_losses = []
+            processed_steps = 0
 
             for step, batch in enumerate(self.train_dataloader, start=1):
+                if batch is None:
+                    logger.warning("Skipping empty whisper_qa training batch at epoch=%d loader_step=%d", epoch, step)
+                    continue
+
+                processed_steps += 1
                 self.global_step += 1
                 loss, loss_info = self._compute_batch_loss(batch=batch, epoch_index=epoch)
                 running_losses.append(loss_info)
@@ -198,18 +204,23 @@ class WhisperQATrainer:
 
                 if self.global_step % log_every_steps == 0:
                     logger.info(
-                        "epoch=%d step=%d total_loss=%.4f asr_loss=%.4f qa_loss=%.4f",
+                        "epoch=%d step=%d total_loss=%.4f asr_loss=%.4f qa_loss=%.4f skipped_in_batch=%d",
                         epoch,
                         self.global_step,
                         loss_info["total_loss"],
                         loss_info["asr_loss"],
                         loss_info["qa_loss"],
+                        int(batch.get("num_skipped_examples", 0)),
                     )
 
             epoch_record: Dict[str, Any] = {
                 "epoch": epoch,
                 "train_loss": running_losses[-1] if running_losses else {},
+                "processed_steps": processed_steps,
             }
+
+            if processed_steps == 0:
+                logger.warning("Epoch %d completed with zero valid whisper_qa batches.", epoch)
 
             if eval_each_epoch and self.eval_dataloader is not None:
                 eval_dir = self.output_dir / "eval" / f"epoch_{epoch:02d}"

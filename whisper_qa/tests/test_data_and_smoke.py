@@ -120,6 +120,7 @@ class DataAndSmokeTests(unittest.TestCase):
 
             model.eval()
             batch = next(iter(val_loader))
+            assert batch is not None
             result = model.predict_single(batch["input_features"][0:1], question_bank=question_bank)
             self.assertIn(result["predicted_label"], {"scam", "non_scam"})
             self.assertIn("label_scores", result)
@@ -136,6 +137,27 @@ class DataAndSmokeTests(unittest.TestCase):
             self.assertTrue((eval_dir / "predictions.jsonl").exists())
             self.assertTrue((eval_dir / "predictions.csv").exists())
             self.assertIn("macro_f1", eval_result["metrics"])
+        finally:
+            shutil.rmtree(tmp_path, ignore_errors=True)
+
+    def test_collator_skips_invalid_audio_without_raising(self):
+        tmp_path = self._make_workspace_tmpdir()
+        try:
+            manifest_root = self._create_manifest_fixture(tmp_path)
+            records = load_manifest_records(manifest_root, split_name="train")
+            broken = dict(TeleAntiFraudManifestDataset(records)[0])
+            broken["audio_path"] = str(tmp_path / "missing.mp3")
+
+            config = build_test_config(tmp_path)
+            processor = ToyProcessor(feature_length=8)
+            collator = WhisperQACollator(processor=processor, config=config)
+
+            batch = collator([broken, TeleAntiFraudManifestDataset(records)[1]])
+            self.assertIsNotNone(batch)
+            assert batch is not None
+            self.assertEqual(batch["input_features"].shape[0], 1)
+            self.assertEqual(batch["num_skipped_examples"], 1)
+            self.assertEqual(len(batch["skipped_audio_paths"]), 1)
         finally:
             shutil.rmtree(tmp_path, ignore_errors=True)
 

@@ -1,7 +1,7 @@
 ﻿from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Sequence
+from typing import Any, Dict, List
 
 import torch
 from torch.utils.data import DataLoader
@@ -21,6 +21,9 @@ def run_evaluation(
     rows: List[Dict[str, Any]] = []
 
     for batch in dataloader:
+        if batch is None:
+            continue
+
         input_features = batch["input_features"].to(model.device)
         for batch_index in range(input_features.shape[0]):
             prediction = model.predict_single(input_features[batch_index : batch_index + 1], question_bank=question_bank)

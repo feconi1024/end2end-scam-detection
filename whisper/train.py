@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import random
 import sys
 from pathlib import Path
 
@@ -43,7 +44,7 @@ def parse_args() -> argparse.Namespace:
         "-d",
         type=Path,
         required=True,
-        help="Path to TeleAntiFraud-28k dataset prepared as a Hugging Face DatasetDict (load_from_disk).",
+        help="Path to a saved DatasetDict, a manifest folder, or a single CSV manifest.",
     )
     parser.add_argument(
         "--train_split",
@@ -54,8 +55,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--eval_split",
         type=str,
-        default="validation",
-        help="Name of the evaluation split in the DatasetDict.",
+        default="val",
+        help="Evaluation split name. For manifest folders this usually maps to val_manifest.csv.",
     )
     parser.add_argument(
         "--seed",
@@ -100,6 +101,9 @@ def main() -> int:
             labels = eval_dataset["label"]
             scam_indices = [i for i, y in enumerate(labels) if y == "scam"]
             non_indices = [i for i, y in enumerate(labels) if y == "non_scam"]
+            rng = random.Random(args.seed)
+            rng.shuffle(scam_indices)
+            rng.shuffle(non_indices)
             per_class = max_eval_samples // 2
             selected = scam_indices[:per_class] + non_indices[:per_class]
             # If we don't have enough of one class, fill from the other.

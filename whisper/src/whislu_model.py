@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import MethodType
 from typing import Any, Mapping
 
 import torch
@@ -23,8 +24,6 @@ def configure_generation_for_json(
     model.config.suppress_tokens = None
     if hasattr(model.config, "begin_suppress_tokens"):
         model.config.begin_suppress_tokens = None
-    if hasattr(model.config, "no_timestamps_token_id"):
-        model.config.no_timestamps_token_id = None
 
     if getattr(model, "generation_config", None) is not None:
         model.generation_config.forced_decoder_ids = None
@@ -35,14 +34,44 @@ def configure_generation_for_json(
             model.generation_config.language = None
         if hasattr(model.generation_config, "task"):
             model.generation_config.task = None
-        if hasattr(model.generation_config, "no_timestamps_token_id"):
-            model.generation_config.no_timestamps_token_id = None
         if hasattr(model.generation_config, "return_timestamps"):
             model.generation_config.return_timestamps = False
         if hasattr(model.generation_config, "is_multilingual"):
             # Keep the decoder prompt to SOT-only so generation matches
             # the SOT-only supervision used during training.
             model.generation_config.is_multilingual = False
+
+    if not hasattr(model, "_whislu_original_retrieve_init_tokens"):
+        model._whislu_original_retrieve_init_tokens = model._retrieve_init_tokens
+
+        def _retrieve_init_tokens_without_notimestamps(self, *args, **kwargs):
+            init_tokens = self._whislu_original_retrieve_init_tokens(*args, **kwargs)
+            generation_config = kwargs.get("generation_config")
+            if generation_config is None and len(args) >= 3:
+                generation_config = args[2]
+
+            no_timestamps_token_id = getattr(generation_config, "no_timestamps_token_id", None)
+            if no_timestamps_token_id is None:
+                return init_tokens
+
+            if (
+                isinstance(init_tokens, torch.Tensor)
+                and init_tokens.ndim == 2
+                and init_tokens.shape[1] > 1
+                and torch.all(init_tokens[:, -1] == no_timestamps_token_id)
+            ):
+                # HF Whisper auto-appends <|notimestamps|> when
+                # return_timestamps=False. Our labels were trained from SOT-only,
+                # so remove that trailing prompt token while keeping
+                # `no_timestamps_token_id` intact for internal generation logic.
+                init_tokens = init_tokens[:, :-1]
+
+            return init_tokens
+
+        model._retrieve_init_tokens = MethodType(
+            _retrieve_init_tokens_without_notimestamps,
+            model,
+        )
 
     return model
 

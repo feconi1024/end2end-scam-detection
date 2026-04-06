@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 
 import torch
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 from .metrics import compute_metrics, write_json, write_jsonl, write_prediction_csv
 
@@ -16,12 +17,23 @@ def run_evaluation(
     question_bank: Any,
     output_dir: Path | None = None,
     split_name: str | None = None,
+    show_progress: bool = True,
+    progress_desc: str | None = None,
 ) -> Dict[str, Any]:
     model.eval()
     rows: List[Dict[str, Any]] = []
 
-    for batch in dataloader:
+    eval_iterator = tqdm(
+        dataloader,
+        total=len(dataloader),
+        desc=progress_desc or f"Evaluate {split_name or ''}".strip(),
+        leave=True,
+        disable=not show_progress,
+    )
+
+    for batch in eval_iterator:
         if batch is None:
+            eval_iterator.set_postfix(skipped_batch=True)
             continue
 
         input_features = batch["input_features"].to(model.device)
@@ -43,6 +55,11 @@ def run_evaluation(
                     "raw_path": batch["raw_paths"][batch_index],
                 }
             )
+
+        eval_iterator.set_postfix(
+            examples=len(rows),
+            skipped=int(batch.get("num_skipped_examples", 0)),
+        )
 
     metrics = compute_metrics(rows)
     if output_dir is not None:

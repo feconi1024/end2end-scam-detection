@@ -9,6 +9,7 @@ from typing import Any, Dict, Mapping
 import torch
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 from transformers import get_linear_schedule_with_warmup
 
 from .config import dump_config
@@ -67,6 +68,7 @@ class WhisperQATrainer:
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_fp16)
         self.global_step = 0
         self.best_metric = float("-inf")
+        self.show_progress = bool(self.training_cfg.get("show_progress_bar", True))
 
         trainable_report = self.model.trainable_parameter_report()
         with (self.output_dir / "trainable_params.json").open("w", encoding="utf-8") as f:
@@ -183,9 +185,18 @@ class WhisperQATrainer:
             running_losses = []
             processed_steps = 0
 
-            for step, batch in enumerate(self.train_dataloader, start=1):
+            train_iterator = tqdm(
+                self.train_dataloader,
+                total=len(self.train_dataloader),
+                desc=f"Train Epoch {epoch}/{epochs}",
+                leave=True,
+                disable=not self.show_progress,
+            )
+
+            for step, batch in enumerate(train_iterator, start=1):
                 if batch is None:
                     logger.warning("Skipping empty whisper_qa training batch at epoch=%d loader_step=%d", epoch, step)
+                    train_iterator.set_postfix(skipped_batch=True)
                     continue
 
                 processed_steps += 1
@@ -201,6 +212,13 @@ class WhisperQATrainer:
 
                 if step % grad_accum_steps == 0 or step == len(self.train_dataloader):
                     self._optimizer_step()
+
+                train_iterator.set_postfix(
+                    total_loss=f"{loss_info['total_loss']:.4f}",
+                    asr_loss=f"{loss_info['asr_loss']:.4f}",
+                    qa_loss=f"{loss_info['qa_loss']:.4f}",
+                    skipped=int(batch.get("num_skipped_examples", 0)),
+                )
 
                 if self.global_step % log_every_steps == 0:
                     logger.info(
@@ -229,6 +247,9 @@ class WhisperQATrainer:
                     dataloader=self.eval_dataloader,
                     question_bank=self.question_bank,
                     output_dir=eval_dir,
+                    split_name=f"epoch_{epoch:02d}",
+                    show_progress=self.show_progress,
+                    progress_desc=f"Eval Epoch {epoch}/{epochs}",
                 )
                 epoch_record["eval"] = eval_result["metrics"]
                 current_metric = float(eval_result["metrics"]["macro_f1"])

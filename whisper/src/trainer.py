@@ -78,6 +78,7 @@ class WeightedLossSeq2SeqTrainer(Seq2SeqTrainer):
 
         has_labels = "labels" in inputs
         inputs = self._prepare_inputs(inputs)
+        forward_inputs = {k: v for k, v in inputs.items() if k != "loss_weights"}
 
         if len(gen_kwargs) == 0 and hasattr(self, "_gen_kwargs"):
             gen_kwargs = self._gen_kwargs.copy()
@@ -89,7 +90,7 @@ class WeightedLossSeq2SeqTrainer(Seq2SeqTrainer):
         default_synced_gpus = is_deepspeed_zero3_enabled()
         gen_kwargs["synced_gpus"] = gen_kwargs.get("synced_gpus", default_synced_gpus)
 
-        generation_inputs = {k: v for k, v in inputs.items() if k != "loss_weights"}
+        generation_inputs = forward_inputs.copy()
         if (
             "labels" in generation_inputs
             and "decoder_input_ids" in generation_inputs
@@ -122,7 +123,7 @@ class WeightedLossSeq2SeqTrainer(Seq2SeqTrainer):
         with torch.no_grad():
             if has_labels:
                 with self.compute_loss_context_manager():
-                    outputs = model(**inputs)
+                    outputs = model(**forward_inputs)
                 loss = (outputs["loss"] if isinstance(outputs, dict) else outputs[0]).detach().mean()
             else:
                 loss = None

@@ -84,6 +84,7 @@ def prepare_dataset_mapping_fn(
     )
     align_transcript_to_audio_chunk = bool(config.get("align_transcript_to_audio_chunk", True))
     audio_chunk_seconds = float(config.get("audio_chunk_seconds", 30.0))
+    intent_loss_weight = float(config.get("intent_loss_weight", 1.0))
     domain_column = config.get("domain_column")
 
     def _stringify(value: Any) -> str:
@@ -186,6 +187,7 @@ def prepare_dataset_mapping_fn(
         )
         json_str = json.dumps(json_obj, ensure_ascii=False)
         ids = _encode_text(json_str) + [tokenizer.eos_token_id]
+        loss_weights = [1.0] * len(ids)
 
         # Final safety pass: if BPE boundary effects still pushed the sequence
         # over budget, tighten the transcript budget rather than truncating the
@@ -205,13 +207,31 @@ def prepare_dataset_mapping_fn(
             )
             json_str = json.dumps(json_obj, ensure_ascii=False)
             ids = _encode_text(json_str) + [tokenizer.eos_token_id]
+            loss_weights = [1.0] * len(ids)
 
         # Hard guardrail for pathological cases.
         if len(ids) > max_label_tokens:
             ids = ids[:max_label_tokens]
             ids[-1] = tokenizer.eos_token_id
+            loss_weights = loss_weights[:max_label_tokens]
+            if loss_weights:
+                loss_weights[-1] = max(loss_weights[-1], 1.0)
+
+        if intent_loss_weight > 1.0:
+            intent_prefix_obj = _build_json_obj(
+                transcript="",
+                intent=intent,
+                domain=domain,
+            )
+            intent_prefix_text = json.dumps(intent_prefix_obj, ensure_ascii=False)
+            if not intent_only and '"Text": ""' in intent_prefix_text:
+                intent_prefix_text = intent_prefix_text.replace('"Text": ""', '"Text": "')
+            intent_prefix_len = len(_encode_text(intent_prefix_text))
+            for idx in range(min(intent_prefix_len, len(loss_weights))):
+                loss_weights[idx] = intent_loss_weight
 
         batch["labels"] = ids
+        batch["loss_weights"] = loss_weights
         return batch
 
     return _map_batch
@@ -356,7 +376,7 @@ def load_and_prepare_datasets(
         remove_columns=[
             col
             for col in dataset_dict[train_split].column_names
-            if col not in ("audio", "label", "labels", "audio_duration_seconds")
+            if col not in ("audio", "label", "labels", "loss_weights", "audio_duration_seconds")
         ],
         num_proc=num_proc,
     )
@@ -403,6 +423,7 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 
         input_feats_list: List[Dict[str, Any]] = []
         label_features: List[Dict[str, Any]] = []
+        weight_features: List[Dict[str, Any]] = []
 
         for feature in features:
             if "labels" not in feature:
@@ -429,6 +450,7 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 
                 input_feats_list.append({"input_features": inputs["input_features"][0]})
                 label_features.append({"input_ids": feature["labels"]})
+                weight_features.append({"input_ids": feature.get("loss_weights", [1.0] * len(feature["labels"]))})
             except Exception:
                 continue
 
@@ -442,6 +464,7 @@ class DataCollatorSpeechSeq2SeqWithPadding:
             )
             input_feats_list.append({"input_features": inputs["input_features"][0]})
             label_features.append({"input_ids": features[0]["labels"]})
+            weight_features.append({"input_ids": features[0].get("loss_weights", [1.0] * len(features[0]["labels"]))})
 
         batch = fe.pad(
             input_feats_list,
@@ -454,8 +477,16 @@ class DataCollatorSpeechSeq2SeqWithPadding:
             padding=True,
             return_tensors="pt",
         )
+        weights_batch = self.processor.tokenizer.pad(
+            weight_features,
+            padding=True,
+            return_tensors="pt",
+        )
 
         labels = labels_batch["input_ids"]
         labels = labels.masked_fill(labels_batch.attention_mask.ne(1), -100)
         batch["labels"] = labels
+        loss_weights = weights_batch["input_ids"].to(batch["input_features"].dtype)
+        loss_weights = loss_weights.masked_fill(labels_batch.attention_mask.ne(1), 0.0)
+        batch["loss_weights"] = loss_weights
         return batch

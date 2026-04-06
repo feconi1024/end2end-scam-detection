@@ -74,6 +74,7 @@ def prepare_dataset_mapping_fn(
     default_domain = str(config.get("domain", "telephony"))
     include_domain = bool(config.get("include_domain", False))
     intent_only = bool(config.get("train_intent_only", False))
+    intent_first = bool(config.get("intent_first", True))
     max_label_tokens = int(config.get("max_label_tokens", 448))
     max_text_target_tokens_cfg = config.get("max_text_target_tokens")
     max_text_target_tokens = (
@@ -81,6 +82,9 @@ def prepare_dataset_mapping_fn(
         if max_text_target_tokens_cfg is not None
         else None
     )
+    align_transcript_to_audio_chunk = bool(config.get("align_transcript_to_audio_chunk", True))
+    audio_chunk_seconds = float(config.get("audio_chunk_seconds", 30.0))
+    intent_loss_weight = float(config.get("intent_loss_weight", 1.0))
     domain_column = config.get("domain_column")
 
     def _stringify(value: Any) -> str:
@@ -110,11 +114,18 @@ def prepare_dataset_mapping_fn(
         domain: str,
     ) -> Dict[str, str]:
         json_obj: Dict[str, str] = {}
-        if not intent_only:
-            json_obj["Text"] = transcript
-            if include_domain:
-                json_obj["Domain"] = domain
-        json_obj["Intent"] = intent
+        if intent_first:
+            json_obj["Intent"] = intent
+            if not intent_only:
+                json_obj["Text"] = transcript
+                if include_domain:
+                    json_obj["Domain"] = domain
+        else:
+            if not intent_only:
+                json_obj["Text"] = transcript
+                if include_domain:
+                    json_obj["Domain"] = domain
+            json_obj["Intent"] = intent
         return json_obj
 
     def _encode_text(text: str) -> List[int]:
@@ -137,8 +148,20 @@ def prepare_dataset_mapping_fn(
             raw_transcript = _stringify(batch.get(txt_col))
             transcript = raw_transcript
 
+            if align_transcript_to_audio_chunk and transcript:
+                duration_seconds = batch.get("audio_duration_seconds")
+                try:
+                    duration_seconds = float(duration_seconds)
+                except (TypeError, ValueError):
+                    duration_seconds = None
+
+                if duration_seconds is not None and duration_seconds > audio_chunk_seconds:
+                    ratio = max(0.05, min(1.0, audio_chunk_seconds / duration_seconds))
+                    approx_chars = max(1, int(len(transcript) * ratio))
+                    transcript = transcript[:approx_chars]
+
             # Reserve explicit budget for the trailing Intent field so that
-            # long telephone-call transcripts do not truncate the main label.
+            # the transcript body does not crowd out the main label.
             envelope_obj = _build_json_obj(
                 transcript="",
                 intent=intent,
@@ -164,6 +187,7 @@ def prepare_dataset_mapping_fn(
         )
         json_str = json.dumps(json_obj, ensure_ascii=False)
         ids = _encode_text(json_str) + [tokenizer.eos_token_id]
+        loss_weights = [1.0] * len(ids)
 
         # Final safety pass: if BPE boundary effects still pushed the sequence
         # over budget, tighten the transcript budget rather than truncating the
@@ -183,13 +207,31 @@ def prepare_dataset_mapping_fn(
             )
             json_str = json.dumps(json_obj, ensure_ascii=False)
             ids = _encode_text(json_str) + [tokenizer.eos_token_id]
+            loss_weights = [1.0] * len(ids)
 
         # Hard guardrail for pathological cases.
         if len(ids) > max_label_tokens:
             ids = ids[:max_label_tokens]
             ids[-1] = tokenizer.eos_token_id
+            loss_weights = loss_weights[:max_label_tokens]
+            if loss_weights:
+                loss_weights[-1] = max(loss_weights[-1], 1.0)
+
+        if intent_loss_weight > 1.0:
+            intent_prefix_obj = _build_json_obj(
+                transcript="",
+                intent=intent,
+                domain=domain,
+            )
+            intent_prefix_text = json.dumps(intent_prefix_obj, ensure_ascii=False)
+            if not intent_only and '"Text": ""' in intent_prefix_text:
+                intent_prefix_text = intent_prefix_text.replace('"Text": ""', '"Text": "')
+            intent_prefix_len = len(_encode_text(intent_prefix_text))
+            for idx in range(min(intent_prefix_len, len(loss_weights))):
+                loss_weights[idx] = intent_loss_weight
 
         batch["labels"] = ids
+        batch["loss_weights"] = loss_weights
         return batch
 
     return _map_batch
@@ -243,8 +285,16 @@ def load_and_prepare_datasets(
         if "transcript" not in df.columns:
             df["transcript"] = ""
 
+        def _duration_seconds(path_str: str) -> float:
+            try:
+                return float(sf.info(path_str).duration)
+            except Exception:
+                return float("nan")
+
+        df["audio_duration_seconds"] = df["audio"].apply(_duration_seconds)
+
         ds = Dataset.from_pandas(
-            df[["audio", "label", "transcript"]],
+            df[["audio", "label", "transcript", "audio_duration_seconds"]],
             preserve_index=False,
         )
         ds = ds.cast_column("audio", Audio(sampling_rate=sampling_rate))
@@ -326,7 +376,7 @@ def load_and_prepare_datasets(
         remove_columns=[
             col
             for col in dataset_dict[train_split].column_names
-            if col not in ("audio", "label", "labels")
+            if col not in ("audio", "label", "labels", "loss_weights", "audio_duration_seconds")
         ],
         num_proc=num_proc,
     )
@@ -373,6 +423,7 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 
         input_feats_list: List[Dict[str, Any]] = []
         label_features: List[Dict[str, Any]] = []
+        weight_features: List[Dict[str, Any]] = []
 
         for feature in features:
             if "labels" not in feature:
@@ -399,6 +450,7 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 
                 input_feats_list.append({"input_features": inputs["input_features"][0]})
                 label_features.append({"input_ids": feature["labels"]})
+                weight_features.append({"input_ids": feature.get("loss_weights", [1.0] * len(feature["labels"]))})
             except Exception:
                 continue
 
@@ -412,6 +464,7 @@ class DataCollatorSpeechSeq2SeqWithPadding:
             )
             input_feats_list.append({"input_features": inputs["input_features"][0]})
             label_features.append({"input_ids": features[0]["labels"]})
+            weight_features.append({"input_ids": features[0].get("loss_weights", [1.0] * len(features[0]["labels"]))})
 
         batch = fe.pad(
             input_feats_list,
@@ -424,8 +477,16 @@ class DataCollatorSpeechSeq2SeqWithPadding:
             padding=True,
             return_tensors="pt",
         )
+        weights_batch = self.processor.tokenizer.pad(
+            weight_features,
+            padding=True,
+            return_tensors="pt",
+        )
 
         labels = labels_batch["input_ids"]
         labels = labels.masked_fill(labels_batch.attention_mask.ne(1), -100)
         batch["labels"] = labels
+        loss_weights = weights_batch["input_ids"].to(batch["input_features"].dtype)
+        loss_weights = loss_weights.masked_fill(labels_batch.attention_mask.ne(1), 0.0)
+        batch["loss_weights"] = loss_weights
         return batch

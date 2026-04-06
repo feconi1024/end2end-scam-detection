@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import MethodType
 from typing import Any, Mapping
 
 import torch
@@ -23,8 +24,6 @@ def configure_generation_for_json(
     model.config.suppress_tokens = None
     if hasattr(model.config, "begin_suppress_tokens"):
         model.config.begin_suppress_tokens = None
-    if hasattr(model.config, "no_timestamps_token_id"):
-        model.config.no_timestamps_token_id = None
 
     if getattr(model, "generation_config", None) is not None:
         model.generation_config.forced_decoder_ids = None
@@ -35,14 +34,37 @@ def configure_generation_for_json(
             model.generation_config.language = None
         if hasattr(model.generation_config, "task"):
             model.generation_config.task = None
-        if hasattr(model.generation_config, "no_timestamps_token_id"):
-            model.generation_config.no_timestamps_token_id = None
         if hasattr(model.generation_config, "return_timestamps"):
             model.generation_config.return_timestamps = False
         if hasattr(model.generation_config, "is_multilingual"):
             # Keep the decoder prompt to SOT-only so generation matches
             # the SOT-only supervision used during training.
             model.generation_config.is_multilingual = False
+
+    if not hasattr(model, "_whislu_original_retrieve_init_tokens"):
+        model._whislu_original_retrieve_init_tokens = model._retrieve_init_tokens
+
+        def _retrieve_sot_only_init_tokens(
+            self,
+            input_features,
+            batch_size,
+            generation_config,
+            config,
+            num_segment_frames,
+            kwargs,
+        ):
+            del input_features, generation_config, config, num_segment_frames, kwargs
+            return torch.full(
+                (batch_size, 1),
+                fill_value=self.config.decoder_start_token_id,
+                dtype=torch.long,
+                device=self.device,
+            )
+
+        model._retrieve_init_tokens = MethodType(
+            _retrieve_sot_only_init_tokens,
+            model,
+        )
 
     return model
 

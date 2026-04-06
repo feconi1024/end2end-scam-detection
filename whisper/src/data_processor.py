@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Tuple
 
 import json
 import numpy as np
@@ -20,23 +20,25 @@ def load_config(config_path: Path) -> Dict[str, Any]:
 
 def create_processor(config: Mapping[str, Any]) -> Tuple[WhisperProcessor, int]:
     """
-    Create WhisperProcessor for Whisper-based SLU.
+    Create the WhisperProcessor used by the WhiSLU pipeline.
 
-    Returns (processor, num_added_tokens).
+    The processor language is configurable because the local TeleAntiFraud
+    manifests currently contain mostly Chinese transcripts.
     """
     model_name = config["model_name"]
+    language = config.get("language")
+    task = str(config.get("task", "transcribe"))
 
-    processor = WhisperProcessor.from_pretrained(
-        model_name,
-        language="en",
-        task="transcribe",
-    )
+    processor_kwargs: Dict[str, Any] = {"task": task}
+    if language is not None:
+        processor_kwargs["language"] = str(language)
 
-    # Ensure we have a pad token; Whisper commonly reuses eos as pad.
+    processor = WhisperProcessor.from_pretrained(model_name, **processor_kwargs)
+
+    # Whisper commonly reuses EOS as PAD.
     if processor.tokenizer.pad_token is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
 
-    # No additional special tokens are added when using JSON-formatted targets.
     return processor, 0
 
 
@@ -47,114 +49,145 @@ def prepare_dataset_mapping_fn(
     text_column: Optional[str] = None,
 ) -> Any:
     """
-    Build a mapping function to prepare TeleAntiFraud-style examples with
-    JSON-formatted multitask targets.
+    Build a mapping function for TeleAntiFraud-style examples.
 
-    Two modes:
-    - Full JSON (default):
+    Default full target format:
       {
-        "Intent": "scam",
-        "Domain": "telephony",
-        "Text": "<transcript>"
-      }
-    - Intent-only JSON (if config['train_intent_only'] is true):
-      {
+        "Text": "<transcript>",
         "Intent": "scam"
       }
 
-    The training sequence is:
-      <|startoftranscript|>{...}<|endoftext|>
+    Optional constant/column-backed domain can be enabled with
+    `include_domain: true`, which yields:
+      {
+        "Text": "<transcript>",
+        "Domain": "telephony",
+        "Intent": "scam"
+      }
+
+    This keeps the main SLU prediction last, matching the original WhiSLU
+    sequence-level multitask ordering more closely than the previous
+    intent-first format.
     """
 
     tokenizer = processor.tokenizer
     default_domain = str(config.get("domain", "telephony"))
-    intent_only: bool = bool(config.get("train_intent_only", False))
+    include_domain = bool(config.get("include_domain", False))
+    intent_only = bool(config.get("train_intent_only", False))
+    max_label_tokens = int(config.get("max_label_tokens", 448))
+    max_text_target_tokens_cfg = config.get("max_text_target_tokens")
+    max_text_target_tokens = (
+        int(max_text_target_tokens_cfg)
+        if max_text_target_tokens_cfg is not None
+        else None
+    )
+    domain_column = config.get("domain_column")
 
-    # Whisper decoder hard maximum.
-    MAX_LABEL_TOKENS = 448
+    def _stringify(value: Any) -> str:
+        if value is None:
+            return ""
+        try:
+            is_na = pd.isna(value)
+            if isinstance(is_na, (bool, np.bool_)) and is_na:
+                return ""
+        except Exception:
+            pass
+        return str(value)
 
-    # Pre-compute the token overhead of the JSON envelope (everything except
-    # the transcript body).  We tokenize once with an empty "Text" field so
-    # that we know exactly how many tokens are available for the transcript.
-    if not intent_only:
-        _envelope = json.dumps(
-            {"Intent": "", "Domain": default_domain, "Text": ""},
-            ensure_ascii=False,
-        )
-        _envelope_ids = tokenizer(_envelope, add_special_tokens=False)["input_ids"]
-        # +1 for the EOS token we append; +3 safety margin for BPE boundary
-        # effects when the transcript is re-encoded inside the JSON context.
-        _envelope_overhead = len(_envelope_ids) + 1 + 3
+    def _resolve_domain(batch: MutableMapping[str, Any]) -> str:
+        if not include_domain:
+            return ""
+        if domain_column:
+            candidate = _stringify(batch.get(domain_column))
+            if candidate:
+                return candidate
+        return default_domain
+
+    def _build_json_obj(
+        *,
+        transcript: str,
+        intent: str,
+        domain: str,
+    ) -> Dict[str, str]:
+        json_obj: Dict[str, str] = {}
+        if not intent_only:
+            json_obj["Text"] = transcript
+            if include_domain:
+                json_obj["Domain"] = domain
+        json_obj["Intent"] = intent
+        return json_obj
+
+    def _encode_text(text: str) -> List[int]:
+        return tokenizer(text, add_special_tokens=False)["input_ids"]
 
     def _map_batch(batch: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
-        # Ground truth label (single-label classification)
         raw_label = batch.get(label_column)
         if isinstance(raw_label, (list, tuple)):
             raw_label = raw_label[0] if raw_label else ""
-        intent = str(raw_label) if raw_label is not None else ""
 
-        if intent_only:
-            json_obj = {"Intent": intent}
-        else:
+        intent = _stringify(raw_label)
+        domain = _resolve_domain(batch)
+
+        transcript = ""
+        raw_transcript = ""
+        text_budget = 0
+
+        if not intent_only:
             txt_col = text_column or "transcript"
-            transcript = batch.get(txt_col) or ""
+            raw_transcript = _stringify(batch.get(txt_col))
+            transcript = raw_transcript
 
-            # --- Compress transcript to fit within the 448-token budget ---
-            # Tokenize the transcript in isolation and truncate to the
-            # available budget, then decode back to text.  This guarantees
-            # the final JSON is always structurally complete (closing `"}`
-            # are never cut off) while preserving as much semantic content
-            # as the token budget allows.
-            text_budget = max(0, MAX_LABEL_TOKENS - _envelope_overhead)
+            # Reserve explicit budget for the trailing Intent field so that
+            # long telephone-call transcripts do not truncate the main label.
+            envelope_obj = _build_json_obj(
+                transcript="",
+                intent=intent,
+                domain=domain,
+            )
+            envelope_ids = _encode_text(json.dumps(envelope_obj, ensure_ascii=False))
+            text_budget = max(0, max_label_tokens - len(envelope_ids) - 1 - 3)
+            if max_text_target_tokens is not None:
+                text_budget = min(text_budget, max_text_target_tokens)
+
             if transcript:
-                text_ids = tokenizer(
-                    transcript, add_special_tokens=False
-                )["input_ids"]
+                text_ids = _encode_text(transcript)
                 if len(text_ids) > text_budget:
-                    text_ids = text_ids[:text_budget]
                     transcript = tokenizer.decode(
-                        text_ids, skip_special_tokens=True
+                        text_ids[:text_budget],
+                        skip_special_tokens=True,
                     )
 
-            json_obj = {
-                "Intent": intent,
-                "Domain": default_domain,
-                "Text": transcript,
-            }
-
+        json_obj = _build_json_obj(
+            transcript=transcript,
+            intent=intent,
+            domain=domain,
+        )
         json_str = json.dumps(json_obj, ensure_ascii=False)
+        ids = _encode_text(json_str) + [tokenizer.eos_token_id]
 
-        # Tokenize the JSON text ONLY — do NOT embed special token strings
-        # (like <|endoftext|>) in the text.  The Whisper fast tokenizer does
-        # not recognise special-token strings inside input text when
-        # add_special_tokens=False; it would BPE-encode "<|endoftext|>" as
-        # regular characters instead of the single token ID 50257, so the
-        # model would never learn to produce the real EOS and would loop
-        # until max_length during generation.
-        ids = tokenizer(json_str, add_special_tokens=False)["input_ids"]
+        # Final safety pass: if BPE boundary effects still pushed the sequence
+        # over budget, tighten the transcript budget rather than truncating the
+        # JSON envelope blindly.
+        if len(ids) > max_label_tokens and not intent_only and raw_transcript:
+            excess = len(ids) - max_label_tokens
+            tighter_budget = max(0, text_budget - excess - 2)
+            tighter_ids = _encode_text(raw_transcript)[:tighter_budget]
+            transcript = tokenizer.decode(
+                tighter_ids,
+                skip_special_tokens=True,
+            )
+            json_obj = _build_json_obj(
+                transcript=transcript,
+                intent=intent,
+                domain=domain,
+            )
+            json_str = json.dumps(json_obj, ensure_ascii=False)
+            ids = _encode_text(json_str) + [tokenizer.eos_token_id]
 
-        # Manually append the real EOS token ID.
-        ids = ids + [tokenizer.eos_token_id]
-
-        # Final safety: if BPE re-tokenization made the sequence slightly
-        # longer than expected, trim transcript tokens from the end while
-        # keeping the JSON envelope intact.  In practice the 3-token safety
-        # margin above makes this a no-op.
-        if len(ids) > MAX_LABEL_TOKENS:
-            # The JSON closing '"}' is the last ~2 tokens before EOS.
-            # Rebuild with a tighter budget rather than blindly truncating.
-            if not intent_only and transcript:
-                excess = len(ids) - MAX_LABEL_TOKENS
-                tighter_budget = max(0, text_budget - excess - 2)
-                text_ids = tokenizer(
-                    batch.get(text_column or "transcript") or "",
-                    add_special_tokens=False,
-                )["input_ids"][:tighter_budget]
-                trimmed = tokenizer.decode(text_ids, skip_special_tokens=True)
-                json_obj["Text"] = trimmed
-                json_str = json.dumps(json_obj, ensure_ascii=False)
-                ids = tokenizer(json_str, add_special_tokens=False)["input_ids"]
-                ids = ids + [tokenizer.eos_token_id]
+        # Hard guardrail for pathological cases.
+        if len(ids) > max_label_tokens:
+            ids = ids[:max_label_tokens]
+            ids[-1] = tokenizer.eos_token_id
 
         batch["labels"] = ids
         return batch
@@ -167,7 +200,7 @@ def load_and_prepare_datasets(
     processor: WhisperProcessor,
     config: Mapping[str, Any],
     train_split: str = "train",
-    eval_split: str = "validation",
+    eval_split: str = "val",
     label_column: str = "label",
     text_column: Optional[str] = None,
     num_proc: Optional[int] = None,
@@ -175,38 +208,38 @@ def load_and_prepare_datasets(
     """
     Load a TeleAntiFraud-28k dataset and prepare it for Whisper training.
 
-    This supports two formats:
-    1) A Hugging Face dataset directory created via `datasets.DatasetDict.save_to_disk`
-       (loaded with `load_from_disk`).
-    2) A plain folder containing CSV manifests (e.g. `train_manifest.csv`,
-       `validation_manifest.csv`) with columns: `path,label,transcript`.
+    Supported inputs:
+    1) A Hugging Face DatasetDict saved with `save_to_disk`.
+    2) A folder containing CSV manifests such as:
+       `train_manifest.csv`, `val_manifest.csv`, `test_manifest.csv`
+       with columns `path,label,transcript`.
+    3) A single CSV manifest path, which is treated as both train and eval.
     """
-    sampling_rate: int = int(config.get("sampling_rate", 16000))
+    sampling_rate = int(config.get("sampling_rate", 16000))
 
     def _build_dataset_from_manifest(manifest: Path, root_dir: Path) -> Dataset:
-        """
-        Build a datasets.Dataset from a CSV manifest.
-        Expected columns: `path,label,transcript`.
-        `path` is interpreted relative to `root_dir` if not absolute.
-        """
         df = pd.read_csv(manifest)
 
         if "path" not in df.columns or "label" not in df.columns:
-            raise ValueError(f"Manifest {manifest} must contain at least 'path' and 'label' columns.")
+            raise ValueError(
+                f"Manifest {manifest} must contain at least 'path' and 'label' columns."
+            )
 
         def _resolve_path(p: str) -> str:
-            # Always return an absolute path so that audio loading works
-            # correctly even in multiprocessing workers where the CWD may differ.
             p_path = Path(p)
             if not p_path.is_absolute():
-                p_path = (root_dir / p).resolve()
+                candidates = [
+                    (root_dir / p).resolve(),
+                    (root_dir.parent / p).resolve(),
+                ]
+                existing = next((candidate for candidate in candidates if candidate.exists()), None)
+                p_path = existing or candidates[0]
             else:
                 p_path = p_path.resolve()
             return str(p_path)
 
         df["audio"] = df["path"].apply(_resolve_path)
 
-        # Ensure transcript column exists even if empty
         if "transcript" not in df.columns:
             df["transcript"] = ""
 
@@ -217,50 +250,67 @@ def load_and_prepare_datasets(
         ds = ds.cast_column("audio", Audio(sampling_rate=sampling_rate))
         return ds
 
+    def _resolve_manifest_path(dataset_dir: Path, split_name: str) -> Path:
+        candidates = [dataset_dir / f"{split_name}_manifest.csv"]
+
+        if split_name == "val":
+            candidates.append(dataset_dir / "validation_manifest.csv")
+        elif split_name == "validation":
+            candidates.append(dataset_dir / "val_manifest.csv")
+
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+
+        candidate_names = ", ".join(path.name for path in candidates)
+        raise FileNotFoundError(
+            f"Could not find a manifest for split '{split_name}' under {dataset_dir}. "
+            f"Tried: {candidate_names}"
+        )
+
     dataset_dict: DatasetDict
 
     if dataset_path.is_dir():
-        # First try: treat as a saved Hugging Face dataset directory
         try:
             dataset_dict = load_from_disk(str(dataset_path))
             dataset_dict = dataset_dict.cast_column("audio", Audio(sampling_rate=sampling_rate))
-        except Exception:
-            # Fallback: treat as TeleAntiFraud-style folder with CSV manifests
-            train_manifest = dataset_path / f"{train_split}_manifest.csv"
-            eval_manifest = dataset_path / f"{eval_split}_manifest.csv"
 
-            if not train_manifest.exists():
-                raise FileNotFoundError(
-                    f"Expected training manifest not found: {train_manifest}. "
-                    f"Provide a dataset directory created via `save_to_disk` or a folder "
-                    f"containing '{train_split}_manifest.csv'."
+            if train_split not in dataset_dict:
+                raise KeyError(
+                    f"Split '{train_split}' not found in dataset at {dataset_path}. "
+                    f"Available: {list(dataset_dict.keys())}"
                 )
 
-            # If a dedicated eval manifest is missing, try a common alternative or
-            # fall back to using the training manifest for both.
-            if not eval_manifest.exists():
-                alt_eval = dataset_path / "validation_manifest.csv"
-                if alt_eval.exists():
-                    eval_manifest = alt_eval
+            if eval_split not in dataset_dict:
+                if eval_split == "val" and "validation" in dataset_dict:
+                    eval_split = "validation"
+                elif eval_split == "validation" and "val" in dataset_dict:
+                    eval_split = "val"
                 else:
-                    eval_manifest = train_manifest
+                    raise KeyError(
+                        f"Split '{eval_split}' not found in dataset at {dataset_path}. "
+                        f"Available: {list(dataset_dict.keys())}"
+                    )
+        except Exception:
+            train_manifest = _resolve_manifest_path(dataset_path, train_split)
+            eval_manifest = _resolve_manifest_path(dataset_path, eval_split)
 
-            # When dataset_path is a directory like `<root>/TeleAntiFraud-28k`
-            # and CSV paths are `TeleAntiFraud-28k/merged_result/...`,
-            # we need to join against `dataset_path` itself so that
-            # final audio paths become `<root>/TeleAntiFraud-28k/TeleAntiFraud-28k/...`.
+            # Manifest paths are stored like
+            # `TeleAntiFraud-28k/merged_result/...`, while the actual local
+            # audio lives under `<repo>/TeleAntiFraud-28k/TeleAntiFraud-28k/...`.
+            # `_resolve_path()` above tries both `root_dir / path` and
+            # `root_dir.parent / path` so this also works when dataset_path is
+            # `TeleAntiFraud-28k/corrected_manifests` or `hard_manifests`.
             root_dir = dataset_path
             train_ds = _build_dataset_from_manifest(train_manifest, root_dir=root_dir)
             eval_ds = _build_dataset_from_manifest(eval_manifest, root_dir=root_dir)
             dataset_dict = DatasetDict({train_split: train_ds, eval_split: eval_ds})
     else:
-        # If a single CSV manifest is given, treat it as both train and eval.
         if dataset_path.suffix.lower() == ".csv":
             root_dir = dataset_path.parent
             train_ds = _build_dataset_from_manifest(dataset_path, root_dir=root_dir)
             dataset_dict = DatasetDict({train_split: train_ds, eval_split: train_ds})
         else:
-            # Fallback: assume this is a `save_to_disk` directory path
             dataset_dict = load_from_disk(str(dataset_path))
             dataset_dict = dataset_dict.cast_column("audio", Audio(sampling_rate=sampling_rate))
 
@@ -274,8 +324,9 @@ def load_and_prepare_datasets(
     processed = dataset_dict.map(
         mapping_fn,
         remove_columns=[
-            # Keep audio + original label + generated labels.
-            col for col in dataset_dict[train_split].column_names if col not in ("audio", "label", "labels")
+            col
+            for col in dataset_dict[train_split].column_names
+            if col not in ("audio", "label", "labels")
         ],
         num_proc=num_proc,
     )
@@ -311,36 +362,28 @@ def load_audio_for_inference(
 class DataCollatorSpeechSeq2SeqWithPadding:
     """
     Data collator that:
-    - Pads log-Mel input features to max length in the batch.
-    - Pads labels and replaces padding positions with -100 for CE loss masking.
+    - Pads log-Mel input features to the max length in the batch.
+    - Pads labels and masks padding positions with -100.
     """
 
     processor: WhisperProcessor
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Build batch from raw audio + label ids.
-        Invalid audio examples are skipped at collator time so training
-        is robust to occasional corrupt files.
-        """
         fe = self.processor.feature_extractor
 
         input_feats_list: List[Dict[str, Any]] = []
         label_features: List[Dict[str, Any]] = []
 
-        for f in features:
-            # Skip examples without labels
-            if "labels" not in f:
+        for feature in features:
+            if "labels" not in feature:
                 continue
 
             try:
-                audio = f["audio"]
+                audio = feature["audio"]
                 array = audio["array"]
                 sr = audio["sampling_rate"]
 
-                # Rely on feature extractor's expected sampling rate
                 sampling_rate = getattr(fe, "sampling_rate", sr)
-
                 if sr != sampling_rate:
                     duration = array.shape[0] / sr
                     target_len = int(duration * sampling_rate)
@@ -355,16 +398,11 @@ class DataCollatorSpeechSeq2SeqWithPadding:
                 )
 
                 input_feats_list.append({"input_features": inputs["input_features"][0]})
-                label_features.append({"input_ids": f["labels"]})
+                label_features.append({"input_ids": feature["labels"]})
             except Exception:
-                # Corrupt or unreadable audio: drop this example from batch
                 continue
 
         if not input_feats_list:
-            # Extremely unlikely, but as a safety net we synthesize a short
-            # dummy waveform and run it through the feature extractor so that
-            # the resulting mel features have the exact expected shape
-            # (including Whisper's required length of 3000 frames).
             sampling_rate = getattr(fe, "sampling_rate", 16000)
             dummy_audio = np.zeros(int(sampling_rate * 0.1), dtype=np.float32)
             inputs = fe(
@@ -373,7 +411,6 @@ class DataCollatorSpeechSeq2SeqWithPadding:
                 return_attention_mask=False,
             )
             input_feats_list.append({"input_features": inputs["input_features"][0]})
-            # Reuse the first example's labels so loss is still well-defined.
             label_features.append({"input_ids": features[0]["labels"]})
 
         batch = fe.pad(
@@ -389,12 +426,6 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         )
 
         labels = labels_batch["input_ids"]
-        # Mask padding positions with -100 so they are ignored by the loss.
-        # IMPORTANT: use the attention mask, NOT token-ID comparison.
-        # For Whisper pad_token_id == eos_token_id (both 50257), so comparing
-        # by ID would also mask the legitimate EOS at the end of each label
-        # sequence — the model would never learn to stop generating.
         labels = labels.masked_fill(labels_batch.attention_mask.ne(1), -100)
         batch["labels"] = labels
         return batch
-

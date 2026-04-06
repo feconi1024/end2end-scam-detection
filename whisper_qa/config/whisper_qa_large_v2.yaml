@@ -1,0 +1,63 @@
+﻿model:
+  name: "openai/whisper-large-v2"
+  language: "zh"
+  task: "transcribe"
+  sampling_rate: 16000
+  audio_chunk_seconds: 30.0
+  transcript_max_label_tokens: 128
+  transcript_max_cache_tokens: 96
+  align_transcript_to_audio_chunk: true
+  transcript_generation_max_new_tokens: 160
+  no_timestamps: true
+
+data:
+  dataset_path: "TeleAntiFraud-28k/corrected_manifests"
+  train_split: "train"
+  eval_split: "val"
+  test_split: "test"
+  label_column: "label"
+  text_column: "transcript"
+  max_eval_samples: 512
+  num_workers: 0
+
+questions:
+  bank_path: "whisper_qa/config/questions_zh.yaml"
+  aggregation: "mean"
+
+tuning:
+  mode: "prefix"
+  prefix:
+    encoder_prefix_length: 10
+    decoder_prefix_length: 30
+    init_std: 0.02
+
+training:
+  output_dir: "outputs/whisper_qa_large_v2"
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 8
+  num_train_epochs: 10
+  learning_rate: 2.0e-3
+  weight_decay: 0.0
+  warmup_steps: 0
+  max_grad_norm: 1.0
+  log_every_steps: 20
+  eval_each_epoch: true
+  save_each_epoch: true
+  asr_loss_weight: 0.5
+  qa_loss_weight: 1.0
+  gradient_checkpointing: true
+  bf16: true
+  fp16: false
+  seed: 42
+
+evaluation:
+  output_dir: "outputs/whisper_qa_large_v2/eval"
+  save_predictions: true
+  max_eval_samples: 512
+
+inference:
+  output_dir: "outputs/whisper_qa_large_v2/inference"
+  transcript_source: "whisper_asr_greedy"
+  max_new_tokens: 160
+  do_sample: false

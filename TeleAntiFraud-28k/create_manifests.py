@@ -12,6 +12,7 @@ Additional metadata columns are included for leakage auditing and harder splits:
 Split modes:
     - stratified: example-level stratified split by (label, strategy)
     - grouped: keep identical transcript groups together across splits
+    - family_heldout: keep top-level audio families disjoint across splits
     - hard_bigram: grouped split where the test set is biased toward transcript
       groups containing rare character bigrams, adapted from the paper's
       unseen-bigram hard-test idea for Chinese transcripts
@@ -317,6 +318,102 @@ def grouped_split(
     }
 
 
+def _split_family_list(
+    families: List[str],
+    train_ratio: float,
+    val_ratio: float,
+) -> Tuple[List[str], List[str], List[str]]:
+    n = len(families)
+    if n == 0:
+        return [], [], []
+    if n == 1:
+        return list(families), [], []
+    if n == 2:
+        return [families[0]], [], [families[1]]
+
+    n_train = int(round(n * train_ratio))
+    n_val = int(round(n * val_ratio))
+    n_test = n - n_train - n_val
+
+    if n_val <= 0:
+        n_val = 1
+        n_train = max(1, n_train - 1)
+    if n_test <= 0:
+        n_test = 1
+        n_train = max(1, n_train - 1)
+
+    while n_train + n_val + n_test > n:
+        if n_train > 1:
+            n_train -= 1
+        elif n_val > 1:
+            n_val -= 1
+        else:
+            n_test -= 1
+
+    while n_train + n_val + n_test < n:
+        n_train += 1
+
+    train_families = families[:n_train]
+    val_families = families[n_train : n_train + n_val]
+    test_families = families[n_train + n_val : n_train + n_val + n_test]
+    return train_families, val_families, test_families
+
+
+def family_heldout_split(
+    examples: List[AudioExample],
+    train_ratio: float,
+    val_ratio: float,
+) -> Tuple[List[AudioExample], List[AudioExample], List[AudioExample], Dict[str, object]]:
+    family_examples: Dict[str, List[AudioExample]] = defaultdict(list)
+    family_label: Dict[str, str] = {}
+    family_strategy: Dict[str, str] = {}
+
+    for ex in examples:
+        family_examples[ex.family].append(ex)
+        family_label.setdefault(ex.family, ex.label)
+        family_strategy.setdefault(ex.family, ex.strategy)
+
+    by_label: Dict[str, List[str]] = defaultdict(list)
+    for family, label in family_label.items():
+        by_label[label].append(family)
+
+    train_families: List[str] = []
+    val_families: List[str] = []
+    test_families: List[str] = []
+
+    for label, families in by_label.items():
+        random.shuffle(families)
+        label_train, label_val, label_test = _split_family_list(
+            families,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+        )
+        train_families.extend(label_train)
+        val_families.extend(label_val)
+        test_families.extend(label_test)
+
+    train_family_set = set(train_families)
+    val_family_set = set(val_families)
+    test_family_set = set(test_families)
+
+    train = [ex for ex in examples if ex.family in train_family_set]
+    val = [ex for ex in examples if ex.family in val_family_set]
+    test = [ex for ex in examples if ex.family in test_family_set]
+    random.shuffle(train)
+    random.shuffle(val)
+    random.shuffle(test)
+
+    return train, val, test, {
+        "split_mode": "family_heldout",
+        "grouped": True,
+        "group_unit": "family",
+        "num_families": len(family_examples),
+        "train_families": sorted(train_families),
+        "val_families": sorted(val_families),
+        "test_families": sorted(test_families),
+    }
+
+
 def hard_bigram_split(
     examples: List[AudioExample],
     train_ratio: float,
@@ -410,6 +507,14 @@ def summarize_split(
             train_bigrams.update(_char_bigrams(ex.transcript))
         return sum(1 for ex in eval_like if any(bg not in train_bigrams for bg in _char_bigrams(ex.transcript)))
 
+    def _family_overlap(
+        left: Sequence[AudioExample],
+        right: Sequence[AudioExample],
+    ) -> int:
+        left_families = {ex.family for ex in left}
+        right_families = {ex.family for ex in right}
+        return len(left_families & right_families)
+
     return {
         "train": {
             "size": len(train),
@@ -432,6 +537,9 @@ def summarize_split(
             "train_val_transcript_hash_overlap": _exact_transcript_overlap(train, val),
             "train_test_transcript_hash_overlap": _exact_transcript_overlap(train, test),
             "val_test_transcript_hash_overlap": _exact_transcript_overlap(val, test),
+            "train_val_family_overlap": _family_overlap(train, val),
+            "train_test_family_overlap": _family_overlap(train, test),
+            "val_test_family_overlap": _family_overlap(val, test),
         },
     }
 
@@ -553,9 +661,10 @@ def main() -> None:
         "--split-mode",
         type=str,
         default="grouped",
-        choices=["stratified", "grouped", "hard_bigram"],
+        choices=["stratified", "grouped", "family_heldout", "hard_bigram"],
         help=(
             "Split strategy. `grouped` prevents identical transcripts from crossing splits. "
+            "`family_heldout` keeps top-level audio families disjoint across splits. "
             "`hard_bigram` additionally biases the test set toward transcript groups with rare character bigrams."
         ),
     )
@@ -597,6 +706,13 @@ def main() -> None:
         groups = _build_groups(examples)
     elif args.split_mode == "grouped":
         train, val, test, split_stats = grouped_split(
+            examples,
+            train_ratio=args.train_ratio,
+            val_ratio=args.val_ratio,
+        )
+        groups = _build_groups(examples)
+    elif args.split_mode == "family_heldout":
+        train, val, test, split_stats = family_heldout_split(
             examples,
             train_ratio=args.train_ratio,
             val_ratio=args.val_ratio,

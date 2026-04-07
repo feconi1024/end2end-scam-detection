@@ -1,0 +1,56 @@
+dataset:
+  # Family split
+  train_manifest: "TeleAntiFraud-28k/family_heldout_manifests/train_manifest.csv"
+  val_manifest: "TeleAntiFraud-28k/family_heldout_manifests/val_manifest.csv"
+  test_manifest: "TeleAntiFraud-28k/family_heldout_manifests/test_manifest.csv"
+
+  # Audio loading
+  sample_rate: 16000
+  fixed_duration_seconds: 15.0
+  train_noise_max_amp: 0.005
+
+  # Label names in the manifest
+  scam_label: "scam"
+  non_scam_label: "non_scam"
+
+model:
+  whisper_model_name: "openai/whisper-small"
+  bert_model_name: "bert-base-multilingual-uncased"
+
+  num_labels: 2
+
+  projector:
+    conv_kernel_size: 3
+    conv_stride: 4
+    conv_padding: 1
+    conv_dilation: 1
+
+  ctc_blank_token_id: 0
+  ctc_min_char_freq: 1
+
+  freeze_epochs: 1
+  audio_unfreeze_num_layers: 4
+
+training:
+  num_epochs: 10
+  batch_size: 4
+  learning_rate: 3.0e-5
+  weight_decay: 0.01
+  lr_after_unfreeze_factor: 0.5
+  gradient_accumulation_steps: 8
+
+  ctc_weight: 0.3
+  slu_weight: 0.7
+
+  max_grad_norm: 1.0
+  warmup_ratio: 0.05
+  mixed_precision: "bf16"
+
+  device: "cuda"
+  num_workers: 1
+  prefetch_factor: 1
+  persistent_workers: false
+  pin_memory: true
+  log_interval: 10
+
+  output_dir: "e2e_cascading/checkpoints_family_split"

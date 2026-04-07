@@ -110,7 +110,14 @@ def main() -> int:
     config = load_config(args.config)
     processor, _ = create_processor(config)
 
-    train_dataset, eval_dataset, label2id, id2label = load_and_prepare_classification_datasets(
+    (
+        train_dataset,
+        eval_dataset,
+        label2id,
+        id2label,
+        family2id,
+        _,
+    ) = load_and_prepare_classification_datasets(
         dataset_path=args.dataset_path,
         processor=processor,
         config=config,
@@ -128,6 +135,7 @@ def main() -> int:
         label2id=label2id,
         id2label=id2label,
         config=config,
+        family2id=family2id,
     )
 
     output_dir = Path(training_cfg.get("output_dir", "outputs/whisper_classifier"))

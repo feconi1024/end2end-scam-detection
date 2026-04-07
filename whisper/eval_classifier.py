@@ -97,7 +97,7 @@ def main() -> int:
     else:
         processor, _ = create_processor(config)
 
-    _, eval_dataset, _, id2label = load_and_prepare_classification_datasets(
+    _, eval_dataset, _, id2label, _, _ = load_and_prepare_classification_datasets(
         dataset_path=args.dataset_path,
         processor=processor,
         config=config,

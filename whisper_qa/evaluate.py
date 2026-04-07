@@ -59,7 +59,7 @@ def main() -> int:
     model = WhisperQAModel(processor=processor, config=config)
     checkpoint = args.checkpoint or (
         resolve_repo_relative(config.get("training", {}).get("output_dir", "outputs/whisper_qa"), args.config)
-        / "last_checkpoint.pt"
+        / "best_checkpoint.pt"
     )
     payload = torch.load(str(checkpoint), map_location="cpu")
     model.load_checkpoint_payload(payload["model_payload"])

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -150,9 +151,74 @@ def initialize_classifier_model(
     return model
 
 
+def _has_model_weights(model_dir: Path) -> bool:
+    return any(
+        (model_dir / filename).exists()
+        for filename in (
+            "pytorch_model.bin",
+            "model.safetensors",
+            "tf_model.h5",
+            "model.ckpt.index",
+            "flax_model.msgpack",
+        )
+    )
+
+
+def resolve_classifier_model_dir(model_dir: str | Path) -> Path:
+    requested = Path(model_dir)
+    candidates = []
+
+    if requested.exists():
+        candidates.append(requested)
+
+    if requested.name == "model":
+        candidates.append(requested.parent)
+    else:
+        candidates.append(requested / "model")
+
+    trainer_state_path = requested.parent / "trainer_state.json" if requested.name == "model" else requested / "trainer_state.json"
+    if trainer_state_path.exists():
+        try:
+            trainer_state = json.loads(trainer_state_path.read_text(encoding="utf-8"))
+            best_checkpoint = trainer_state.get("best_model_checkpoint")
+            if best_checkpoint:
+                candidates.append(Path(best_checkpoint))
+        except Exception:
+            pass
+
+    checkpoint_root = requested.parent if requested.name == "model" else requested
+    if checkpoint_root.exists():
+        checkpoint_dirs = sorted(
+            (
+                path for path in checkpoint_root.glob("checkpoint-*")
+                if path.is_dir()
+            ),
+            key=lambda path: int(path.name.split("-")[-1]) if path.name.split("-")[-1].isdigit() else -1,
+            reverse=True,
+        )
+        candidates.extend(checkpoint_dirs)
+
+    seen = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if candidate.is_dir() and _has_model_weights(candidate):
+            return candidate
+
+    raise OSError(
+        f"Could not find a saved classifier model under {requested}. "
+        "Checked the requested directory, its parent/output dir, and available checkpoint-* folders."
+    )
+
+
 def load_classifier_for_inference(model_dir: str | Path) -> WhisperEncoderForScamClassification:
+    resolved_model_dir = resolve_classifier_model_dir(model_dir)
+    if Path(model_dir) != resolved_model_dir:
+        logger.warning("Classifier model dir %s was missing; loading fallback checkpoint from %s", model_dir, resolved_model_dir)
     model = WhisperEncoderForScamClassification.from_pretrained(
-        str(model_dir),
+        str(resolved_model_dir),
         torch_dtype=torch.float32,
         low_cpu_mem_usage=True,
     )

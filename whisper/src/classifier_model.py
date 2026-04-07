@@ -13,6 +13,17 @@ from transformers.modeling_outputs import SequenceClassifierOutput
 logger = logging.getLogger(__name__)
 
 
+class GradientReversal(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input_tensor: torch.Tensor, alpha: float) -> torch.Tensor:
+        ctx.alpha = float(alpha)
+        return input_tensor.view_as(input_tensor)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        return -ctx.alpha * grad_output, None
+
+
 class WhisperEncoderForScamClassification(WhisperPreTrainedModel):
     """
     Whisper encoder + lightweight classification head.
@@ -26,6 +37,10 @@ class WhisperEncoderForScamClassification(WhisperPreTrainedModel):
         config,
         classifier_dropout: float | None = None,
         classifier_pooling: str | None = None,
+        num_family_labels: int | None = None,
+        family_adversarial_weight: float | None = None,
+        family_gradient_scale: float | None = None,
+        compute_family_loss_on_eval: bool | None = None,
         **kwargs,
     ):
         del kwargs
@@ -34,14 +49,31 @@ class WhisperEncoderForScamClassification(WhisperPreTrainedModel):
             config.classifier_dropout = float(classifier_dropout)
         if classifier_pooling is not None:
             config.classifier_pooling = str(classifier_pooling)
+        if num_family_labels is not None:
+            config.num_family_labels = int(num_family_labels)
+        if family_adversarial_weight is not None:
+            config.family_adversarial_weight = float(family_adversarial_weight)
+        if family_gradient_scale is not None:
+            config.family_gradient_scale = float(family_gradient_scale)
+        if compute_family_loss_on_eval is not None:
+            config.compute_family_loss_on_eval = bool(compute_family_loss_on_eval)
 
         self.num_labels = int(getattr(config, "num_labels", 2))
         self.pooling = str(getattr(config, "classifier_pooling", "mean"))
         dropout = float(getattr(config, "classifier_dropout", 0.1))
+        self.num_family_labels = int(getattr(config, "num_family_labels", 0))
+        self.family_adversarial_weight = float(getattr(config, "family_adversarial_weight", 0.0))
+        self.family_gradient_scale = float(getattr(config, "family_gradient_scale", 1.0))
+        self.compute_family_loss_on_eval = bool(getattr(config, "compute_family_loss_on_eval", False))
 
         self.whisper = WhisperModel(config)
         self.dropout = nn.Dropout(dropout)
         self.classifier = nn.Linear(config.d_model, self.num_labels)
+        self.family_classifier: Optional[nn.Linear]
+        if self.num_family_labels > 0 and self.family_adversarial_weight > 0.0:
+            self.family_classifier = nn.Linear(config.d_model, self.num_family_labels)
+        else:
+            self.family_classifier = None
         self.class_weights: Optional[torch.Tensor] = None
 
         self.post_init()
@@ -61,6 +93,7 @@ class WhisperEncoderForScamClassification(WhisperPreTrainedModel):
         input_features: Optional[torch.FloatTensor] = None,
         attention_mask: Optional[torch.LongTensor] = None,
         labels: Optional[torch.LongTensor] = None,
+        family_labels: Optional[torch.LongTensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
@@ -86,6 +119,21 @@ class WhisperEncoderForScamClassification(WhisperPreTrainedModel):
             loss_fct = nn.CrossEntropyLoss(weight=class_weights)
             loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
 
+        if (
+            self.family_classifier is not None
+            and family_labels is not None
+            and (self.training or self.compute_family_loss_on_eval)
+        ):
+            reversed_features = GradientReversal.apply(pooled, self.family_gradient_scale)
+            family_logits = self.family_classifier(self.dropout(reversed_features))
+            family_loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+            family_loss = family_loss_fct(
+                family_logits.view(-1, self.num_family_labels),
+                family_labels.view(-1),
+            )
+            weighted_family_loss = self.family_adversarial_weight * family_loss
+            loss = weighted_family_loss if loss is None else loss + weighted_family_loss
+
         if not return_dict:
             output = (logits, encoder_outputs.hidden_states, encoder_outputs.attentions)
             return ((loss,) + output) if loss is not None else output
@@ -103,15 +151,21 @@ def initialize_classifier_model(
     label2id: Mapping[str, int],
     id2label: Mapping[int, str],
     config: Mapping[str, Any],
+    family2id: Optional[Mapping[str, int]] = None,
     device: str | None = None,
 ) -> WhisperEncoderForScamClassification:
     classifier_cfg = config.get("classifier", {})
+    family_adv_cfg = classifier_cfg.get("family_adversarial", {})
     base_config = WhisperConfig.from_pretrained(model_name)
     base_config.num_labels = len(label2id)
     base_config.label2id = dict(label2id)
     base_config.id2label = {int(idx): label for idx, label in id2label.items()}
     base_config.classifier_dropout = float(classifier_cfg.get("dropout", 0.1))
     base_config.classifier_pooling = str(classifier_cfg.get("pooling", "mean"))
+    base_config.num_family_labels = int(len(family2id or {})) if bool(family_adv_cfg.get("enabled", False)) else 0
+    base_config.family_adversarial_weight = float(family_adv_cfg.get("weight", 0.0))
+    base_config.family_gradient_scale = float(family_adv_cfg.get("gradient_scale", 1.0))
+    base_config.compute_family_loss_on_eval = bool(family_adv_cfg.get("compute_on_eval", False))
 
     model = WhisperEncoderForScamClassification(base_config)
     pretrained_whisper = WhisperModel.from_pretrained(

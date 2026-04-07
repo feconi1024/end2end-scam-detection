@@ -19,6 +19,8 @@ def build_classification_compute_metrics_fn(id2label: Mapping[int, str]) -> Any:
         logits, labels = eval_pred
         if isinstance(logits, tuple):
             logits = logits[0]
+        if isinstance(labels, tuple):
+            labels = labels[0]
 
         predictions = np.argmax(logits, axis=-1)
         precision_macro, recall_macro, f1_macro, _ = precision_recall_fscore_support(
@@ -91,6 +93,10 @@ def create_classifier_training_arguments(
         base_kwargs["load_best_model_at_end"] = bool(
             training_cfg.get("load_best_model_at_end", True)
         )
+    if "label_names" in valid_params:
+        # Keep family_labels available to the model forward pass, but make
+        # Trainer metrics/checkpoint selection operate on the main task label.
+        base_kwargs["label_names"] = ["labels"]
     if "metric_for_best_model" in valid_params:
         base_kwargs["metric_for_best_model"] = str(
             training_cfg.get("metric_for_best_model", "f1_macro")

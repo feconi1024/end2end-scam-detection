@@ -6,6 +6,7 @@ import random
 import sys
 from pathlib import Path
 
+import torch
 from transformers import set_seed
 
 logging.basicConfig(
@@ -143,8 +144,19 @@ def main() -> int:
     )
 
     trainer.train()
-    trainer.model.save_pretrained(str(output_dir / "model"))
-    processor.save_pretrained(str(output_dir / "processor"))
+
+    final_model_dir = output_dir / "model"
+    final_processor_dir = output_dir / "processor"
+
+    # Save the final exported model from CPU to avoid a late GPU memory spike
+    # after training has already finished.
+    trainer.model.to("cpu")
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    final_model_dir.mkdir(parents=True, exist_ok=True)
+    trainer.model.save_pretrained(str(final_model_dir), safe_serialization=False)
+    processor.save_pretrained(str(final_processor_dir))
     return 0
 
 

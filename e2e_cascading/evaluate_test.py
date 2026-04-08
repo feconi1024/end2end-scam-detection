@@ -7,7 +7,7 @@ import platform
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping
 
 os.environ.setdefault("PYTORCH_NVML_BASED_CUDA_CHECK", "1")
 
@@ -49,6 +49,26 @@ def get_dataset_audio_cfg(cfg: Dict[str, Any]) -> Dict[str, float]:
         "fixed_duration_seconds": float(dataset_cfg.get("fixed_duration_seconds", 15.0)),
         "train_noise_max_amp": float(dataset_cfg.get("train_noise_max_amp", 0.005)),
     }
+
+
+def extract_model_state_dict(payload: Any) -> Mapping[str, torch.Tensor]:
+    if isinstance(payload, Mapping):
+        for key in ("model_state_dict", "state_dict"):
+            maybe = payload.get(key)
+            if isinstance(maybe, Mapping):
+                return maybe
+    if isinstance(payload, Mapping):
+        return payload
+    raise TypeError(f"Unsupported checkpoint payload type: {type(payload)!r}")
+
+
+def infer_checkpoint_ctc_vocab_size(state_dict: Mapping[str, torch.Tensor]) -> int | None:
+    weight = state_dict.get("ctc_head.weight")
+    if weight is None:
+        return None
+    if not hasattr(weight, "shape") or len(weight.shape) != 2:
+        return None
+    return int(weight.shape[0])
 
 
 def build_dataloader(
@@ -162,6 +182,15 @@ def main() -> None:
         blank_token_id=ctc_blank_id,
         min_char_freq=ctc_min_char_freq,
     )
+    checkpoint_payload = torch.load(args.checkpoint, map_location="cpu")
+    checkpoint_state = extract_model_state_dict(checkpoint_payload)
+    checkpoint_ctc_vocab_size = infer_checkpoint_ctc_vocab_size(checkpoint_state)
+    if checkpoint_ctc_vocab_size is not None and checkpoint_ctc_vocab_size != ctc_tokenizer.vocab_size:
+        print(
+            "Warning: checkpoint CTC vocab size "
+            f"({checkpoint_ctc_vocab_size}) differs from manifest-derived vocab size "
+            f"({ctc_tokenizer.vocab_size}). Using the checkpoint size for evaluation-time model loading."
+        )
     test_manifest = _resolve_manifest(args.manifest_override or cfg["dataset"].get("test_manifest", ""))
 
     test_ds = TeleAntiFraudDataset(
@@ -181,7 +210,7 @@ def main() -> None:
     )
 
     num_labels = int(cfg["model"]["num_labels"])
-    ctc_vocab_size = ctc_tokenizer.vocab_size
+    ctc_vocab_size = checkpoint_ctc_vocab_size or ctc_tokenizer.vocab_size
     projector_cfg_overrides = cfg["model"].get("projector", {})
 
     model = DifferentiableCascadeModel(
@@ -195,8 +224,7 @@ def main() -> None:
         id2label=id2label,
     )
 
-    state = torch.load(args.checkpoint, map_location="cpu")
-    model.load_state_dict(state)
+    model.load_state_dict(checkpoint_state)
     model.eval()
 
     device_str = resolve_runtime_device(str(cfg["training"].get("device", "cuda")))

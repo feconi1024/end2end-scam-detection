@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import platform
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List
@@ -11,23 +13,33 @@ os.environ.setdefault("PYTORCH_NVML_BASED_CUDA_CHECK", "1")
 
 import torch
 from torch.utils.data import DataLoader
-from transformers import WhisperProcessor, BertTokenizer
-from sklearn.metrics import f1_score
+from transformers import BertTokenizer, WhisperProcessor
+
+_track_root = Path(__file__).resolve().parent
+_repo_root = _track_root.parent
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
 
 from e2e_cascading.src.dataset import (
     CharCTCTokenizer,
     TeleAntiFraudDataset,
-    load_config,
     create_collate_fn,
+    load_config,
 )
 from e2e_cascading.src.device_utils import resolve_runtime_device
 from e2e_cascading.src.model import DifferentiableCascadeModel
+from experiments.common_metrics import (
+    build_standard_report,
+    infer_eval_scope,
+    infer_manifest_family,
+    write_json,
+    write_predictions_csv,
+)
 
 
 def build_label_mapping(cfg: Dict[str, Any]) -> Dict[str, int]:
     scam_label = cfg["dataset"]["scam_label"]
     non_scam_label = cfg["dataset"]["non_scam_label"]
-    # Non-scam = 0, scam = 1
     return {non_scam_label: 0, scam_label: 1}
 
 
@@ -73,9 +85,16 @@ def build_dataloader(
     return DataLoader(**loader_kwargs)
 
 
+def infer_train_family(cfg: Dict[str, Any], repo_root: Path) -> str:
+    train_manifest = Path(str(cfg["dataset"].get("train_manifest", "")))
+    if not train_manifest.is_absolute():
+        train_manifest = (repo_root / train_manifest).resolve()
+    return infer_manifest_family(train_manifest)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Evaluate a checkpoint on the test set and report F1 + latency per minute of audio."
+        description="Evaluate a checkpoint on a manifest and report standardized metrics + latency."
     )
     parser.add_argument(
         "--config",
@@ -90,6 +109,12 @@ def main() -> None:
         help="Path to model checkpoint (.pt) to evaluate.",
     )
     parser.add_argument(
+        "--manifest_override",
+        type=Path,
+        default=None,
+        help="Optional manifest CSV to use instead of dataset.test_manifest from config.",
+    )
+    parser.add_argument(
         "--latency_num_workers",
         type=int,
         default=0,
@@ -101,6 +126,12 @@ def main() -> None:
         default=2,
         help="Warmup batches to run (excluded from timing) to avoid first-batch overhead.",
     )
+    parser.add_argument("--output_json", type=Path, default=None)
+    parser.add_argument("--predictions_csv", type=Path, default=None)
+    parser.add_argument("--model_name", type=str, default="e2e_cascading")
+    parser.add_argument("--train_family", type=str, default=None)
+    parser.add_argument("--eval_family", type=str, default=None)
+    parser.add_argument("--eval_scope", type=str, default=None)
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -108,11 +139,12 @@ def main() -> None:
     config_dir = config_path.parent
     repo_root = config_dir.parent.parent
 
-    def _resolve_manifest(p: str) -> str:
+    def _resolve_manifest(p: str | Path) -> Path:
         path = Path(p)
-        return str(repo_root / p) if not path.is_absolute() else p
+        return (repo_root / path).resolve() if not path.is_absolute() else path.resolve()
 
     label_mapping = build_label_mapping(cfg)
+    id2label = {v: k for k, v in label_mapping.items()}
 
     whisper_name = cfg["model"]["whisper_model_name"]
     bert_name = cfg["model"]["bert_model_name"]
@@ -126,14 +158,14 @@ def main() -> None:
     ctc_min_char_freq = int(cfg["model"].get("ctc_min_char_freq", 1))
     train_manifest = _resolve_manifest(cfg["dataset"].get("train_manifest", ""))
     ctc_tokenizer = CharCTCTokenizer.build_from_manifest(
-        train_manifest,
+        str(train_manifest),
         blank_token_id=ctc_blank_id,
         min_char_freq=ctc_min_char_freq,
     )
-    test_manifest = _resolve_manifest(cfg["dataset"].get("test_manifest", ""))
+    test_manifest = _resolve_manifest(args.manifest_override or cfg["dataset"].get("test_manifest", ""))
 
     test_ds = TeleAntiFraudDataset(
-        manifest_path=test_manifest,
+        manifest_path=str(test_manifest),
         tokenizer=ctc_tokenizer,
         sample_rate=sr,
         split="test",
@@ -150,8 +182,6 @@ def main() -> None:
 
     num_labels = int(cfg["model"]["num_labels"])
     ctc_vocab_size = ctc_tokenizer.vocab_size
-
-    id2label = {v: k for k, v in label_mapping.items()}
     projector_cfg_overrides = cfg["model"].get("projector", {})
 
     model = DifferentiableCascadeModel(
@@ -174,8 +204,6 @@ def main() -> None:
     model.to(device)
     use_cuda = device.type == "cuda"
 
-    # For end-to-end latency (disk I/O + feature extraction + model), default to
-    # single-process DataLoader timing by using num_workers=0.
     requested_workers = 0 if platform.system() == "Windows" else int(args.latency_num_workers)
     batch_size = int(cfg["training"]["batch_size"])
     test_loader = build_dataloader(
@@ -188,16 +216,16 @@ def main() -> None:
         cfg=cfg,
     )
 
-    all_labels: List[int] = []
-    all_preds: List[int] = []
+    all_labels: List[str] = []
+    all_preds: List[str] = []
     total_infer_time = 0.0
     total_e2e_time = 0.0
     total_audio_seconds = 0.0
+    prediction_rows: List[Dict[str, Any]] = []
 
     with torch.no_grad():
-        # Warmup (excluded from timing)
-        for _i, batch in enumerate(test_loader):
-            if _i >= args.warmup_batches:
+        for warmup_index, batch in enumerate(test_loader):
+            if warmup_index >= args.warmup_batches:
                 break
             _ = model(
                 input_features=batch["input_features"].to(device),
@@ -206,7 +234,6 @@ def main() -> None:
             if device.type == "cuda":
                 torch.cuda.synchronize()
 
-        # Full end-to-end timing includes waiting for DataLoader + preprocessing
         start_e2e = time.perf_counter()
         for batch in test_loader:
             start_batch = time.perf_counter()
@@ -215,8 +242,10 @@ def main() -> None:
             labels = batch["labels"].to(device)
 
             durations = batch.get("audio_durations")
+            duration_list: List[float] = []
             if durations is not None:
-                total_audio_seconds += float(durations.sum().item())
+                duration_list = [float(v) for v in durations.cpu().tolist()]
+                total_audio_seconds += sum(duration_list)
 
             start = time.perf_counter()
             outputs = model(
@@ -230,10 +259,22 @@ def main() -> None:
             total_e2e_time += time.perf_counter() - start_batch
 
             logits = outputs["classification_logits"]
-            preds = logits.argmax(dim=-1)
+            preds = logits.argmax(dim=-1).cpu().tolist()
+            batch_labels = labels.cpu().tolist()
 
-            all_labels.extend(labels.cpu().tolist())
-            all_preds.extend(preds.cpu().tolist())
+            for idx, (gold_id, pred_id) in enumerate(zip(batch_labels, preds)):
+                gold = id2label[int(gold_id)]
+                pred = id2label[int(pred_id)]
+                all_labels.append(gold)
+                all_preds.append(pred)
+                prediction_rows.append(
+                    {
+                        'example_index': len(prediction_rows),
+                        'gold_label': gold,
+                        'predicted_label': pred,
+                        'audio_duration_seconds': duration_list[idx] if idx < len(duration_list) else None,
+                    }
+                )
         if device.type == "cuda":
             torch.cuda.synchronize()
         end_e2e = time.perf_counter()
@@ -243,27 +284,34 @@ def main() -> None:
         print("No test examples found.")
         return
 
-    avg_mode = "binary" if len(set(all_labels)) == 2 else "macro"
-    f1 = f1_score(all_labels, all_preds, average=avg_mode)
+    report = build_standard_report(
+        gold_labels=all_labels,
+        predicted_labels=all_preds,
+        model_name=args.model_name,
+        train_family=args.train_family or infer_train_family(cfg, repo_root),
+        eval_family=args.eval_family or infer_manifest_family(test_manifest),
+        eval_scope=args.eval_scope or infer_eval_scope(test_manifest),
+        total_runtime_sec=total_e2e_time,
+        total_audio_seconds=total_audio_seconds,
+        n_skipped=0,
+        metadata={
+            'config': str(args.config),
+            'checkpoint': str(args.checkpoint),
+            'device': device_str,
+        },
+        latency_breakdown={
+            'forward_only_sec': total_infer_time,
+            'end_to_end_sec': total_e2e_time,
+        },
+    )
 
-    audio_minutes = total_audio_seconds / 60.0 if total_audio_seconds > 0 else float("nan")
-    if audio_minutes > 0:
-        latency_per_min = total_infer_time / audio_minutes
-    else:
-        latency_per_min = float("nan")
+    if args.output_json is not None:
+        write_json(args.output_json, report)
+    if args.predictions_csv is not None:
+        write_predictions_csv(args.predictions_csv, prediction_rows)
 
-    print(f"Test F1 ({avg_mode}): {f1:.4f}")
-    print(f"Total inference time (model forward only): {total_infer_time:.3f} s")
-    print(f"Total end-to-end time (data + features + model): {total_e2e_time:.3f} s")
-    print(f"Total audio duration: {audio_minutes:.3f} min")
-    if audio_minutes > 0:
-        latency_per_min_e2e = total_e2e_time / audio_minutes
-    else:
-        latency_per_min_e2e = float("nan")
-    print(f"Latency (forward-only): {latency_per_min:.3f} s per minute of audio")
-    print(f"Latency (end-to-end): {latency_per_min_e2e:.3f} s per minute of audio")
+    print(json.dumps(report, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":
     main()
-

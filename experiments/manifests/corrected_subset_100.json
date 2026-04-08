@@ -1,0 +1,11 @@
+{
+  "input_manifest": "TeleAntiFraud-28k\\corrected_manifests\\test_manifest.csv",
+  "output_manifest": "experiments\\manifests\\corrected_subset_100.csv",
+  "seed": 42,
+  "per_label": 50,
+  "counts": {
+    "non_scam": 50,
+    "scam": 50
+  },
+  "total_rows": 100
+}

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict, List
@@ -22,6 +22,7 @@ def run_evaluation(
 ) -> Dict[str, Any]:
     model.eval()
     rows: List[Dict[str, Any]] = []
+    total_skipped_examples = 0
 
     eval_iterator = tqdm(
         dataloader,
@@ -35,6 +36,9 @@ def run_evaluation(
         if batch is None:
             eval_iterator.set_postfix(skipped_batch=True)
             continue
+
+        skipped_in_batch = int(batch.get('num_skipped_examples', 0))
+        total_skipped_examples += skipped_in_batch
 
         input_features = batch["input_features"].to(model.device)
         for batch_index in range(input_features.shape[0]):
@@ -58,10 +62,11 @@ def run_evaluation(
 
         eval_iterator.set_postfix(
             examples=len(rows),
-            skipped=int(batch.get("num_skipped_examples", 0)),
+            skipped=total_skipped_examples,
         )
 
     metrics = compute_metrics(rows)
+    metrics['n_skipped'] = int(total_skipped_examples)
     if output_dir is not None:
         output_dir.mkdir(parents=True, exist_ok=True)
         write_json(output_dir / "metrics.json", metrics)
@@ -71,4 +76,5 @@ def run_evaluation(
     return {
         "metrics": metrics,
         "rows": rows,
+        'n_skipped': int(total_skipped_examples),
     }
